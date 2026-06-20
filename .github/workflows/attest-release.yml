@@ -6,7 +6,7 @@ on:
       ref:
         description: "Release tag or commit to attest"
         required: true
-        default: "0.1.1"
+        default: "0.1.2"
 
 permissions:
   contents: read
