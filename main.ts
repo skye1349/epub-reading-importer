@@ -7,6 +7,7 @@ import {
   Setting,
   normalizePath
 } from "obsidian";
+import { Buffer } from "buffer";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import {
@@ -71,6 +72,30 @@ const DEFAULT_SETTINGS: EpubImporterSettings = {
   openIndexAfterImport: true
 };
 
+function parseSettings(data: unknown): Partial<EpubImporterSettings> {
+  if (!data || typeof data !== "object") {
+    return {};
+  }
+
+  const raw = data as Partial<Record<keyof EpubImporterSettings, unknown>>;
+  const settings: Partial<EpubImporterSettings> = {};
+
+  if (typeof raw.outputFolder === "string") {
+    settings.outputFolder = raw.outputFolder;
+  }
+  if (typeof raw.pandocPath === "string") {
+    settings.pandocPath = raw.pandocPath;
+  }
+  if (typeof raw.keepSourceEpub === "boolean") {
+    settings.keepSourceEpub = raw.keepSourceEpub;
+  }
+  if (typeof raw.openIndexAfterImport === "boolean") {
+    settings.openIndexAfterImport = raw.openIndexAfterImport;
+  }
+
+  return settings;
+}
+
 export default class EpubReadingImporterPlugin extends Plugin {
   settings: EpubImporterSettings = DEFAULT_SETTINGS;
 
@@ -93,7 +118,7 @@ export default class EpubReadingImporterPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
+    this.settings = { ...DEFAULT_SETTINGS, ...parseSettings(await this.loadData()) };
   }
 
   async saveSettings() {
@@ -207,7 +232,7 @@ class EpubReadingImporterSettingTab extends PluginSettingTab {
 
 function selectEpubFile(): Promise<File | null> {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.type = "file";
     input.accept = ".epub,application/epub+zip";
     input.onchange = () => resolve(input.files?.[0] ?? null);
@@ -592,7 +617,7 @@ function sanitizeFileName(name: string): string {
   const cleaned = decodeEntities(name)
     .normalize("NFKD")
     .replace(/\.[a-z0-9]+$/i, "")
-    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "")
+    .replace(/[<>:"/\\|?*\p{Cc}]+/gu, "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 96);
@@ -682,10 +707,10 @@ function runCommand(command: string, args: string[], options: { cwd?: string } =
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (chunk) => {
+    child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
     });
-    child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
     child.on("error", reject);

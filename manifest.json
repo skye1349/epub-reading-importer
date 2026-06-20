@@ -1,7 +1,7 @@
 {
   "id": "epub-reading-importer",
   "name": "EPUB Reading Importer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.5.0",
   "description": "Import EPUB files into a vault as chapter-based Markdown reading workspaces.",
   "author": "Skye",
