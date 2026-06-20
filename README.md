@@ -17,9 +17,10 @@ Books/
 
 ## Requirements
 
-- Obsidian desktop
+- Obsidian desktop for macOS or Windows
 - `pandoc`
-- macOS `unzip`
+- macOS uses the system `unzip`
+- Windows uses PowerShell `Expand-Archive`
 
 ## Development
 

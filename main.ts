@@ -273,13 +273,7 @@ async function convertEpubForObsidian(options: {
   const extractDir = path.join(options.tempDir, "epub");
   const htmlTmpDir = path.join(options.tempDir, "html");
   const mediaDir = path.join(options.outputDir, "media");
-  const pandoc = await resolveCommand("pandoc", [
-    options.pandocPath,
-    "/opt/homebrew/bin/pandoc",
-    "/usr/local/bin/pandoc",
-    "/usr/bin/pandoc"
-  ]);
-  const unzip = await resolveCommand("unzip", ["/usr/bin/unzip"]);
+  const pandoc = await resolveCommand("pandoc", getPandocCandidates(options.pandocPath));
 
   await mkdir(options.outputDir, { recursive: true });
   await mkdir(extractDir, { recursive: true });
@@ -290,7 +284,7 @@ async function convertEpubForObsidian(options: {
     await copyFile(options.inputPath, path.join(options.outputDir, "source.epub"));
   }
 
-  await runCommand(unzip, ["-q", options.inputPath, "-d", extractDir]);
+  await extractEpub(options.inputPath, extractDir, options.tempDir);
 
   const epub = await readEpubStructure(extractDir);
   const mediaMap = await copyEpubMedia(epub, mediaDir);
@@ -682,6 +676,58 @@ function normalizeFilePath(value: string): string {
 
 function stripFragment(value: string): string {
   return value.split("#")[0];
+}
+
+function getPandocCandidates(configuredPath: string): Array<string | undefined> {
+  if (os.platform() === "win32") {
+    return [
+      configuredPath,
+      "C:\\Program Files\\Pandoc\\pandoc.exe",
+      "C:\\Program Files (x86)\\Pandoc\\pandoc.exe",
+      path.join(os.homedir(), "AppData", "Local", "Pandoc", "pandoc.exe"),
+      "pandoc.exe",
+      "pandoc"
+    ];
+  }
+
+  return [
+    configuredPath,
+    "/opt/homebrew/bin/pandoc",
+    "/usr/local/bin/pandoc",
+    "/usr/bin/pandoc"
+  ];
+}
+
+async function extractEpub(inputPath: string, extractDir: string, tempDir: string): Promise<void> {
+  if (os.platform() === "win32") {
+    await extractEpubWithPowerShell(inputPath, extractDir, tempDir);
+    return;
+  }
+
+  const unzip = await resolveCommand("unzip", ["/usr/bin/unzip"]);
+  await runCommand(unzip, ["-q", inputPath, "-d", extractDir]);
+}
+
+async function extractEpubWithPowerShell(inputPath: string, extractDir: string, tempDir: string): Promise<void> {
+  const zipPath = path.join(tempDir, "source.zip");
+  await copyFile(inputPath, zipPath);
+
+  const powershell = await resolveCommand("powershell.exe", [
+    path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    "powershell.exe",
+    "pwsh.exe"
+  ]);
+
+  await runCommand(powershell, [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    "$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
+    zipPath,
+    extractDir
+  ]);
 }
 
 async function resolveCommand(command: string, candidates: Array<string | undefined>): Promise<string> {
