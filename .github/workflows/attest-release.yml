@@ -1,0 +1,31 @@
+name: Attest release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag or commit to attest"
+        required: true
+        default: "0.1.1"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
