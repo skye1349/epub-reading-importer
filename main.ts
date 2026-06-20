@@ -102,13 +102,13 @@ export default class EpubReadingImporterPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
-    this.addRibbonIcon("book-open", "Import EPUB", () => {
+    this.addRibbonIcon("book-open", "Transfer EPUB to Markdown", () => {
       void this.importEpub();
     });
 
     this.addCommand({
       id: "import-epub-reading-workspace",
-      name: "Import EPUB as reading workspace",
+      name: "Transfer EPUB to Markdown",
       callback: () => {
         void this.importEpub();
       }
@@ -159,7 +159,7 @@ export default class EpubReadingImporterPlugin extends Plugin {
       await rm(tempDir, { recursive: true, force: true });
 
       const indexPath = normalizePath(`${outputFolder}/00 - Index.md`);
-      new Notice(`Imported EPUB to ${outputFolder}`);
+      new Notice(`Transferred EPUB to ${outputFolder}`);
 
       if (this.settings.openIndexAfterImport) {
         await this.app.workspace.openLinkText(indexPath, "", false);

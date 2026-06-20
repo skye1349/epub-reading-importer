@@ -1,6 +1,6 @@
-# EPUB Reading Importer
+# EPUB Transfer to Markdown
 
-Desktop-only Obsidian plugin for importing EPUB files as chapter-based Markdown reading workspaces.
+Desktop-only Obsidian plugin for transferring EPUB files into chapter-based Markdown notes.
 
 ## What It Creates
 
@@ -34,4 +34,4 @@ For local testing, copy or symlink this folder into:
 <vault>/.obsidian/plugins/epub-reading-importer
 ```
 
-Then enable **EPUB Reading Importer** in Obsidian community plugins.
+Then enable **EPUB Transfer to Markdown** in Obsidian community plugins.
