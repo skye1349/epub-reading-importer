@@ -5,6 +5,8 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  TFile,
+  TFolder,
   normalizePath
 } from "obsidian";
 import { Buffer } from "buffer";
@@ -14,6 +16,7 @@ import {
   access,
   copyFile,
   mkdir,
+  readdir,
   readFile,
   rm,
   stat,
@@ -25,6 +28,7 @@ import * as path from "path";
 interface EpubImporterSettings {
   outputFolder: string;
   pandocPath: string;
+  kindleEmail: string;
   keepSourceEpub: boolean;
   openIndexAfterImport: boolean;
 }
@@ -68,6 +72,7 @@ interface Section {
 const DEFAULT_SETTINGS: EpubImporterSettings = {
   outputFolder: "Books",
   pandocPath: "",
+  kindleEmail: "",
   keepSourceEpub: true,
   openIndexAfterImport: true
 };
@@ -85,6 +90,9 @@ function parseSettings(data: unknown): Partial<EpubImporterSettings> {
   }
   if (typeof raw.pandocPath === "string") {
     settings.pandocPath = raw.pandocPath;
+  }
+  if (typeof raw.kindleEmail === "string") {
+    settings.kindleEmail = raw.kindleEmail;
   }
   if (typeof raw.keepSourceEpub === "boolean") {
     settings.keepSourceEpub = raw.keepSourceEpub;
@@ -111,6 +119,22 @@ export default class EpubReadingImporterPlugin extends Plugin {
       name: "Transfer EPUB to Markdown",
       callback: () => {
         void this.importEpub();
+      }
+    });
+
+    this.addCommand({
+      id: "export-current-book-to-epub",
+      name: "Export current book to EPUB",
+      callback: () => {
+        void this.exportCurrentBook(false);
+      }
+    });
+
+    this.addCommand({
+      id: "export-current-book-to-kindle",
+      name: "Export current book to EPUB for Kindle",
+      callback: () => {
+        void this.exportCurrentBook(true);
       }
     });
 
@@ -168,6 +192,44 @@ export default class EpubReadingImporterPlugin extends Plugin {
       new Notice(error instanceof Error ? error.message : "EPUB import failed.");
     }
   }
+
+  private async exportCurrentBook(forKindle: boolean) {
+    if (!Platform.isDesktopApp) {
+      new Notice("EPUB export needs Obsidian desktop.");
+      return;
+    }
+
+    try {
+      const activeFile = this.app.workspace.getActiveFile();
+      if (!activeFile) {
+        new Notice("Open a Markdown file inside an imported book first.");
+        return;
+      }
+
+      const vaultBasePath = getVaultBasePath(this.app);
+      const bookFolder = getBookFolder(activeFile);
+      const bookDir = path.join(vaultBasePath, bookFolder.path);
+      const bookName = sanitizeBookName(bookFolder.name || activeFile.basename);
+      const outputPath = path.join(bookDir, `${bookName}.epub`);
+
+      new Notice("Exporting EPUB...");
+      await exportBookFolderToEpub({
+        bookDir,
+        bookName,
+        outputPath,
+        pandocPath: this.settings.pandocPath
+      });
+
+      if (forKindle) {
+        await prepareKindleDelivery(outputPath, this.settings.kindleEmail);
+        return;
+      }
+
+      new Notice(`Exported EPUB to ${bookFolder.path}/${path.basename(outputPath)}`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "EPUB export failed.");
+    }
+  }
 }
 
 class EpubReadingImporterSettingTab extends PluginSettingTab {
@@ -204,6 +266,19 @@ class EpubReadingImporterSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.pandocPath)
           .onChange(async (value) => {
             this.plugin.settings.pandocPath = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Kindle email")
+      .setDesc("Optional Send-to-Kindle email address used when preparing Kindle delivery.")
+      .addText((text) =>
+        text
+          .setPlaceholder("name_123@kindle.com")
+          .setValue(this.plugin.settings.kindleEmail)
+          .onChange(async (value) => {
+            this.plugin.settings.kindleEmail = value.trim();
             await this.plugin.saveSettings();
           })
       );
@@ -341,6 +416,136 @@ async function convertEpubForObsidian(options: {
 
   await writeFile(path.join(options.outputDir, "00 - Index.md"), buildIndex(options.bookName, chapters, options.keepSourceEpub));
   await writeFile(path.join(options.outputDir, "AI Reading Guide.md"), buildReadingGuide(options.bookName, chapters));
+}
+
+async function exportBookFolderToEpub(options: {
+  bookDir: string;
+  bookName: string;
+  outputPath: string;
+  pandocPath: string;
+}): Promise<void> {
+  const pandoc = await resolveCommand("pandoc", getPandocCandidates(options.pandocPath));
+  const markdownFiles = await collectBookMarkdownFiles(options.bookDir);
+
+  if (markdownFiles.length === 0) {
+    throw new Error("No chapter Markdown files were found in the current book folder.");
+  }
+
+  await runCommand(pandoc, [
+    ...markdownFiles,
+    "--from=gfm",
+    "--to=epub3",
+    "--standalone",
+    "--metadata",
+    `title=${options.bookName}`,
+    "--resource-path",
+    options.bookDir,
+    "-o",
+    options.outputPath
+  ]);
+}
+
+async function collectBookMarkdownFiles(bookDir: string): Promise<string[]> {
+  const entries = await stat(bookDir).catch(() => null);
+  if (!entries?.isDirectory()) {
+    throw new Error("The current book folder was not found.");
+  }
+
+  const folderEntries = await readdir(bookDir, { withFileTypes: true });
+  return folderEntries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => /\.md$/i.test(name))
+    .filter((name) => !/^00\s*-\s*Index\.md$/i.test(name))
+    .filter((name) => !/^AI Reading Guide\.md$/i.test(name))
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }))
+    .map((name) => path.join(bookDir, name));
+}
+
+function getBookFolder(activeFile: TFile): TFolder {
+  const parent = activeFile.parent;
+  if (!parent || parent.isRoot()) {
+    throw new Error("Open a Markdown file inside an imported book folder first.");
+  }
+
+  if (parent.name.toLowerCase() === "media" && parent.parent && !parent.parent.isRoot()) {
+    return parent.parent;
+  }
+
+  return parent;
+}
+
+async function prepareKindleDelivery(epubPath: string, kindleEmail: string): Promise<void> {
+  if (!kindleEmail) {
+    throw new Error("Set your Kindle email in the plugin settings first.");
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(kindleEmail)) {
+    throw new Error("The Kindle email setting does not look like a valid email address.");
+  }
+
+  if (os.platform() === "darwin") {
+    await prepareKindleDeliveryWithAppleMail(epubPath, kindleEmail);
+    new Notice("Created a Kindle email draft in Mail.");
+    return;
+  }
+
+  if (os.platform() === "win32") {
+    await prepareKindleDeliveryWithOutlook(epubPath, kindleEmail);
+    new Notice("Created a Kindle email draft in Outlook.");
+    return;
+  }
+
+  throw new Error("Kindle email draft creation is only supported on macOS Mail and Windows Outlook.");
+}
+
+async function prepareKindleDeliveryWithAppleMail(epubPath: string, kindleEmail: string): Promise<void> {
+  await runCommand("osascript", [
+    "-e",
+    [
+      "on run argv",
+      "set kindleAddress to item 1 of argv",
+      "set epubPath to item 2 of argv",
+      "tell application \"Mail\"",
+      "set newMessage to make new outgoing message with properties {subject:\"Convert\", content:\"\", visible:true}",
+      "tell newMessage",
+      "make new to recipient at end of to recipients with properties {address:kindleAddress}",
+      "make new attachment with properties {file name:(POSIX file epubPath)} at after the last paragraph",
+      "end tell",
+      "activate",
+      "end tell",
+      "end run"
+    ].join("\n"),
+    kindleEmail,
+    epubPath
+  ]);
+}
+
+async function prepareKindleDeliveryWithOutlook(epubPath: string, kindleEmail: string): Promise<void> {
+  const powershell = await resolveCommand("powershell.exe", [
+    path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    "powershell.exe",
+    "pwsh.exe"
+  ]);
+
+  await runCommand(powershell, [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    [
+      "$ErrorActionPreference = 'Stop'",
+      "$mail = (New-Object -ComObject Outlook.Application).CreateItem(0)",
+      "$mail.To = $args[0]",
+      "$mail.Subject = 'Convert'",
+      "$mail.Body = ''",
+      "[void] $mail.Attachments.Add($args[1])",
+      "$mail.Display()"
+    ].join("; "),
+    kindleEmail,
+    epubPath
+  ]);
 }
 
 async function readEpubStructure(extractDir: string): Promise<EpubStructure> {

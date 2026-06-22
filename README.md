@@ -4,6 +4,8 @@ Transfer EPUB books into chapter-based Markdown notes.
 
 This plugin is designed for people who keep books and reading notes in a local vault. It converts an EPUB into a folder of Markdown files, keeps image assets together, and creates an index note plus an AI reading guide.
 
+It can also export an edited book folder back to EPUB and prepare a Send-to-Kindle email draft with the exported EPUB attached.
+
 ## What It Creates
 
 After importing an EPUB, the plugin creates a folder like this:
@@ -56,6 +58,8 @@ If pandoc is installed somewhere else, open the plugin settings and enter the fu
 
 ## How to Use
 
+### EPUB to Markdown
+
 1. Install and enable the plugin.
 2. Open the command palette.
 3. Run `Transfer EPUB to Markdown`.
@@ -65,10 +69,32 @@ If pandoc is installed somewhere else, open the plugin settings and enter the fu
 
 You can also click the book icon in the left ribbon.
 
+### Markdown back to EPUB
+
+1. Open any chapter note from a generated book folder.
+2. Open the command palette.
+3. Run `Export current book to EPUB`.
+4. The plugin creates a new `.epub` file in the same book folder.
+
+The export command uses the Markdown files in the current book folder, sorted by filename. It skips `00 - Index.md` and `AI Reading Guide.md` so they do not become book chapters.
+
+### Send to Kindle
+
+1. Set your Kindle email in the plugin settings.
+2. Open any chapter note from a generated book folder.
+3. Run `Export current book to EPUB for Kindle`.
+4. The plugin creates an EPUB and opens an email draft with the EPUB attached.
+5. Review the draft and send it from your mail client.
+
+Kindle delivery uses your Kindle email address, such as `name_123@kindle.com`. Your sending email address must also be approved in your Amazon Kindle document settings.
+
+On macOS, Kindle delivery uses Apple Mail. On Windows, it uses Outlook if Outlook is installed and configured.
+
 ## Settings
 
 - `Output folder`: the vault folder where imported books are created. The default is `Books`.
 - `Pandoc path`: optional full path to pandoc. Leave it blank for auto-detection.
+- `Kindle email`: optional Send-to-Kindle email address for creating Kindle delivery drafts.
 - `Keep source EPUB`: copy the original EPUB into the generated book folder.
 - `Open index after import`: open `00 - Index.md` after the import finishes.
 
@@ -103,11 +129,21 @@ Make sure the generated `media/` folder stays next to the Markdown files. Do not
 
 EPUB files vary a lot. Some books contain clean chapter HTML, while others contain layout-heavy HTML, scanned pages, or unusual navigation files. This plugin tries to create readable Markdown, but the final quality depends on the source EPUB.
 
+### EPUB export fails
+
+Make sure pandoc is installed and the current note is inside a generated book folder. The folder should contain chapter Markdown files such as `01 - Introduction.md` or `02 - Chapter 1.md`.
+
+### Kindle delivery does not open an email draft
+
+Check that your Kindle email is set in the plugin settings.
+
+On macOS, make sure Apple Mail is installed and configured. On Windows, make sure Outlook is installed and configured. The plugin does not store SMTP passwords or send email silently in the background.
+
 ## Privacy and Permissions
 
 The plugin works locally. It does not send book files or notes to a network service.
 
-It does use local filesystem access to read the selected EPUB and write Markdown files into your vault. It also runs local command-line tools such as pandoc, and on Windows it may run PowerShell for EPUB extraction.
+It does use local filesystem access to read the selected EPUB, write Markdown files, and export EPUB files into your vault. It also runs local command-line tools such as pandoc, and on Windows it may run PowerShell for EPUB extraction or Outlook draft creation.
 
 ## Development
 
