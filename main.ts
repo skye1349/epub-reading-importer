@@ -352,7 +352,6 @@ class EpubReaderView extends FileView {
   private extractDir = "";
   private epub: EpubStructure | null = null;
   private chapters: EpubReaderChapter[] = [];
-  private chapterListEl: HTMLElement | null = null;
   private frameEl: HTMLIFrameElement | null = null;
 
   constructor(leaf: WorkspaceLeaf) {
@@ -402,48 +401,26 @@ class EpubReaderView extends FileView {
   private renderReader(file: TFile): void {
     this.contentEl.empty();
     const shell = this.contentEl.createDiv({ cls: "epub-reading-importer-reader-shell" });
-    const sidebar = shell.createDiv({ cls: "epub-reading-importer-reader-sidebar" });
-    const title = this.epub?.title || file.basename;
-    sidebar.createEl("h2", { text: title });
-    this.chapterListEl = sidebar.createDiv({ cls: "epub-reading-importer-reader-chapters" });
     const viewer = shell.createDiv({ cls: "epub-reading-importer-reader-viewer" });
     this.frameEl = viewer.createEl("iframe", {
+      title: this.epub?.title || file.basename,
       attr: {
         sandbox: "allow-same-origin"
       }
     });
 
-    this.renderChapterList();
-    if (this.chapters[0]) {
-      void this.openChapter(0);
-    } else {
+    void this.openBook();
+  }
+
+  private async openBook(): Promise<void> {
+    if (!this.epub || !this.frameEl) return;
+    if (this.chapters.length === 0) {
       this.frameEl.srcdoc = "<p>No readable chapters were found in this EPUB.</p>";
+      return;
     }
-  }
 
-  private renderChapterList(): void {
-    if (!this.chapterListEl) return;
-    this.chapterListEl.empty();
-    this.chapters.forEach((chapter, index) => {
-      const button = this.chapterListEl!.createEl("button", {
-        text: chapter.title || `Chapter ${index + 1}`,
-        cls: "epub-reading-importer-reader-chapter"
-      });
-      button.addEventListener("click", () => {
-        void this.openChapter(index);
-      });
-    });
-  }
-
-  private async openChapter(index: number): Promise<void> {
-    const chapter = this.chapters[index];
-    if (!chapter || !this.epub || !this.frameEl) return;
-    const html = await readFile(chapter.sourcePath, "utf8");
-    const documentHtml = await prepareReaderHtml(html, chapter.sourcePath, this.epub.opfDir);
+    const documentHtml = await prepareReaderBookHtml(this.epub, this.chapters);
     this.frameEl.srcdoc = documentHtml;
-    this.chapterListEl?.querySelectorAll("button").forEach((button, buttonIndex) => {
-      button.toggleClass("is-active", buttonIndex === index);
-    });
   }
 
   private async cleanupTempDir(): Promise<void> {
@@ -692,17 +669,14 @@ function buildReaderChapters(epub: EpubStructure): EpubReaderChapter[] {
   return chapters;
 }
 
-async function prepareReaderHtml(html: string, sourcePath: string, opfDir: string): Promise<string> {
-  let body = html
-    .replace(/<script\b[\s\S]*?<\/script>/gi, "")
-    .replace(/\s(?:src|href|xlink:href)=(["'])([^"']+)\1/gi, (_full, quote: string, rawUrl: string) => {
-      return ` data-epub-resource=${quote}${rawUrl}${quote}`;
-    });
-
-  body = await replaceAsync(body, /\sdata-epub-resource=(["'])([^"']+)\1/gi, async (_full, quote: string, rawUrl: string) => {
-    const rewritten = await rewriteReaderResourceUrl(rawUrl, sourcePath, opfDir);
-    return ` src=${quote}${rewritten}${quote}`;
-  });
+async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderChapter[]): Promise<string> {
+  const sections = await Promise.all(
+    chapters.map(async (chapter) => {
+      const html = await readFile(chapter.sourcePath, "utf8");
+      const body = await prepareReaderSectionHtml(html, chapter.sourcePath, epub.opfDir);
+      return `<section class="epub-section" id="${escapeHtml(chapter.href)}">${body}</section>`;
+    })
+  );
 
   return `<!doctype html>
 <html>
@@ -710,13 +684,19 @@ async function prepareReaderHtml(html: string, sourcePath: string, opfDir: strin
 <meta charset="utf-8">
 <style>
   body {
+    background: #ffffff;
     color: #1f2328;
     font-family: Georgia, "Times New Roman", serif;
     font-size: 18px;
     line-height: 1.65;
     margin: 0 auto;
-    max-width: 780px;
-    padding: 32px;
+    max-width: 820px;
+    padding: 40px 32px;
+  }
+  .epub-section + .epub-section {
+    border-top: 1px solid #e5e7eb;
+    margin-top: 48px;
+    padding-top: 48px;
   }
   img, svg {
     max-width: 100%;
@@ -727,8 +707,35 @@ async function prepareReaderHtml(html: string, sourcePath: string, opfDir: strin
   }
 </style>
 </head>
-<body>${body}</body>
+<body>${sections.join("\n")}</body>
 </html>`;
+}
+
+async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir: string): Promise<string> {
+  let body = extractHtmlBody(html)
+    .replace(/<script\b[\s\S]*?<\/script>/gi, "")
+    .replace(/\s(?:src|href|xlink:href)=(["'])([^"']+)\1/gi, (_full, quote: string, rawUrl: string) => {
+      return ` data-epub-resource=${quote}${rawUrl}${quote}`;
+    });
+
+  body = await replaceAsync(body, /\sdata-epub-resource=(["'])([^"']+)\1/gi, async (_full, quote: string, rawUrl: string) => {
+    const rewritten = await rewriteReaderResourceUrl(rawUrl, sourcePath, opfDir);
+    return ` src=${quote}${rewritten}${quote}`;
+  });
+
+  return body;
+}
+
+function extractHtmlBody(html: string): string {
+  return html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] || html;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 async function rewriteReaderResourceUrl(rawUrl: string, sourcePath: string, opfDir: string): Promise<string> {
