@@ -80,13 +80,13 @@ You can also click the book icon in the left ribbon.
 The source can be a folder:
 
 ```text
-Judgement/Poor Charlies Almanack
+Books/Poor Charlies Almanack
 ```
 
 Or a single Markdown file:
 
 ```text
-Judgement/Poor Charlies Almanack/01 - Dedication.md
+Books/Poor Charlies Almanack/01 - Dedication.md
 ```
 
 The output can be blank, a folder, or a full `.epub` path.
@@ -96,7 +96,7 @@ Source paths can be vault-relative paths. Output paths can be vault-relative pat
 If output is blank, the plugin saves the EPUB next to the source:
 
 ```text
-Judgement/Poor Charlies Almanack/Poor Charlies Almanack.epub
+Books/Poor Charlies Almanack/Poor Charlies Almanack.epub
 ```
 
 If the source is a folder, Markdown files are exported in filename order. The plugin skips `00 - Index.md` and `AI Reading Guide.md` so they do not become book chapters.

@@ -358,10 +358,10 @@ class ExportPathsModal extends Modal {
 
     const sourceSetting = new Setting(contentEl)
       .setName("Source file or folder")
-      .setDesc("Example: Judgement/Poor Charlies Almanack or Judgement/Poor Charlies Almanack/01 - Dedication.md")
+      .setDesc("Example: Books/Poor Charlies Almanack or Books/Poor Charlies Almanack/01 - Dedication.md")
       .addText((text) => {
         text
-          .setPlaceholder("Judgement/Poor Charlies Almanack")
+          .setPlaceholder("Books/Poor Charlies Almanack")
           .setValue(this.sourcePath)
           .onChange((value) => {
             this.sourcePath = value;
@@ -381,7 +381,7 @@ class ExportPathsModal extends Modal {
       .setDesc("Optional. Leave blank to save next to the source. You can enter a folder or a .epub path.")
       .addText((text) => {
         text
-          .setPlaceholder("Judgement/Poor Charlies Almanack.epub")
+          .setPlaceholder("Books/Poor Charlies Almanack.epub")
           .setValue(this.outputPath)
           .onChange((value) => {
             this.outputPath = value;
