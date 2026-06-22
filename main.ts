@@ -414,7 +414,7 @@ class EpubReaderView extends FileView {
 
     try {
       const contents = await this.app.vault.readBinary(file);
-      this.renderReader(file, contents);
+      await this.renderReader(file, contents);
     } catch (error) {
       this.contentEl.empty();
       this.contentEl.createEl("div", {
@@ -432,7 +432,7 @@ class EpubReaderView extends FileView {
     await super.setState(state, result);
   }
 
-  private renderReader(file: TFile, contents: ArrayBuffer): void {
+  private async renderReader(file: TFile, contents: ArrayBuffer): Promise<void> {
     this.contentEl.empty();
     const shell = this.contentEl.createDiv({ cls: "epub-reading-importer-reader-shell" });
 
@@ -451,8 +451,9 @@ class EpubReaderView extends FileView {
       title: "Next page",
       cls: "epub-reading-importer-page-button epub-reading-importer-page-button-right"
     });
+    const statusEl = reader.createDiv({ text: "Loading EPUB...", cls: "epub-reading-importer-reader-loading" });
 
-    this.book = ePub(contents, { openAs: "epub" });
+    this.book = ePub(contents, { replacements: "blobUrl" });
     this.rendition = this.book.renderTo(viewer, {
       width: "100%",
       height: "100%",
@@ -499,10 +500,21 @@ class EpubReaderView extends FileView {
     });
     this.resizeObserver.observe(viewer);
 
-    const savedLocation = this.getSavedReaderLocation(file.path);
-    void this.rendition.display(savedLocation || undefined).catch(() => {
-      void this.rendition?.display();
-    });
+    try {
+      await this.book.ready;
+      await waitForAnimationFrame();
+      this.resizeRendition(viewer);
+      const savedLocation = this.getSavedReaderLocation(file.path);
+      await this.rendition.display(savedLocation || undefined).catch(async () => {
+        this.clearSavedReaderLocation(file.path);
+        await this.rendition?.display();
+      });
+      statusEl.remove();
+      this.contentEl.focus();
+    } catch (error) {
+      statusEl.setText(error instanceof Error ? error.message : "Could not render this EPUB.");
+      statusEl.addClass("epub-reading-importer-reader-error");
+    }
   }
 
   private applyReaderTheme(): void {
@@ -545,6 +557,10 @@ class EpubReaderView extends FileView {
 
   private saveReaderLocation(filePath: string, cfi: string): void {
     activeWindow.localStorage.setItem(this.readerLocationKey(filePath), cfi);
+  }
+
+  private clearSavedReaderLocation(filePath: string): void {
+    activeWindow.localStorage.removeItem(this.readerLocationKey(filePath));
   }
 
   private readerLocationKey(filePath: string): string {
@@ -685,6 +701,12 @@ function getVaultBasePath(app: App): string {
     throw new Error("This importer needs a local desktop vault.");
   }
   return adapter.getBasePath();
+}
+
+function waitForAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    activeWindow.requestAnimationFrame(() => resolve());
+  });
 }
 
 async function uniqueVaultFolder(vaultBasePath: string, outputFolder: string, bookName: string): Promise<string> {
