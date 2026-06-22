@@ -16,6 +16,8 @@ import {
   normalizePath
 } from "obsidian";
 import { Buffer } from "buffer";
+import ePub from "epubjs";
+import type { Book, Contents, Location, Rendition } from "epubjs";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import {
@@ -88,12 +90,6 @@ interface ExportSource {
   displayPath: string;
   bookName: string;
   isFolder: boolean;
-}
-
-interface EpubReaderChapter {
-  href: string;
-  title: string;
-  sourcePath: string;
 }
 
 const EPUB_VIEW_TYPE = "epub-transfer-to-markdown-reader";
@@ -388,11 +384,10 @@ class EpubReadingImporterSettingTab extends PluginSettingTab {
 }
 
 class EpubReaderView extends FileView {
-  private tempDir = "";
-  private extractDir = "";
-  private epub: EpubStructure | null = null;
-  private chapters: EpubReaderChapter[] = [];
-  private frameEl: HTMLIFrameElement | null = null;
+  private book: Book | null = null;
+  private keydownHandler: ((event: KeyboardEvent) => void) | null = null;
+  private rendition: Rendition | null = null;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -412,64 +407,161 @@ class EpubReaderView extends FileView {
   }
 
   async onLoadFile(file: TFile): Promise<void> {
-    await this.cleanupTempDir();
+    await this.cleanupReader();
     this.contentEl.empty();
     this.contentEl.addClass("epub-reading-importer-reader");
     this.contentEl.createEl("div", { text: "Loading EPUB...", cls: "epub-reading-importer-status" });
 
-    this.tempDir = path.join(os.tmpdir(), "epub-reading-importer-reader", `${Date.now()}-${randomId()}`);
-    this.extractDir = path.join(this.tempDir, "epub");
-    await mkdir(this.extractDir, { recursive: true });
-
-    const inputPath = path.join(this.tempDir, "source.epub");
-    await writeFile(inputPath, Buffer.from(await this.app.vault.readBinary(file)));
-    await extractEpub(inputPath, this.extractDir, this.tempDir);
-
-    this.epub = await readEpubStructure(this.extractDir);
-    this.chapters = buildReaderChapters(this.epub);
-    this.renderReader(file);
+    try {
+      const contents = await this.app.vault.readBinary(file);
+      this.renderReader(file, contents);
+    } catch (error) {
+      this.contentEl.empty();
+      this.contentEl.createEl("div", {
+        text: error instanceof Error ? error.message : "Could not open this EPUB.",
+        cls: "epub-reading-importer-status"
+      });
+    }
   }
 
   async onUnloadFile(_file: TFile): Promise<void> {
-    await this.cleanupTempDir();
+    await this.cleanupReader();
   }
 
   async setState(state: unknown, result: ViewStateResult): Promise<void> {
     await super.setState(state, result);
   }
 
-  private renderReader(file: TFile): void {
+  private renderReader(file: TFile, contents: ArrayBuffer): void {
     this.contentEl.empty();
     const shell = this.contentEl.createDiv({ cls: "epub-reading-importer-reader-shell" });
-    const viewer = shell.createDiv({ cls: "epub-reading-importer-reader-viewer" });
-    this.frameEl = viewer.createEl("iframe", {
-      title: this.epub?.title || file.basename,
-      attr: {
-        sandbox: "allow-same-origin"
-      }
+
+    const toolbar = shell.createDiv({ cls: "epub-reading-importer-reader-toolbar" });
+    toolbar.createDiv({ text: file.basename, cls: "epub-reading-importer-reader-title" });
+
+    const reader = shell.createDiv({ cls: "epub-reading-importer-reader-stage" });
+    const viewer = reader.createDiv({ cls: "epub-reading-importer-reader-viewer" });
+    const previousButton = reader.createEl("button", {
+      text: "‹",
+      title: "Previous page",
+      cls: "epub-reading-importer-page-button epub-reading-importer-page-button-left"
+    });
+    const nextButton = reader.createEl("button", {
+      text: "›",
+      title: "Next page",
+      cls: "epub-reading-importer-page-button epub-reading-importer-page-button-right"
     });
 
-    void this.openBook();
+    this.book = ePub(contents, { openAs: "epub" });
+    this.rendition = this.book.renderTo(viewer, {
+      width: "100%",
+      height: "100%",
+      flow: "paginated",
+      manager: "default",
+      spread: "auto",
+      allowScriptedContent: false
+    });
+
+    this.applyReaderTheme();
+    const colors = this.getReaderColors();
+    this.rendition.hooks.content.register((bookContents: Contents) => {
+      bookContents.document.documentElement.style.background = colors.background;
+      bookContents.document.body.style.background = colors.background;
+      bookContents.document.body.style.color = colors.text;
+    });
+
+    this.rendition.on("relocated", (location: Location) => {
+      this.saveReaderLocation(file.path, location.start.cfi);
+    });
+
+    previousButton.onClickEvent(() => {
+      void this.rendition?.prev();
+    });
+    nextButton.onClickEvent(() => {
+      void this.rendition?.next();
+    });
+
+    this.keydownHandler = (event) => {
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        void this.rendition?.prev();
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        void this.rendition?.next();
+      }
+    };
+    this.contentEl.tabIndex = 0;
+    this.contentEl.addEventListener("keydown", this.keydownHandler);
+
+    this.resizeObserver = new ResizeObserver(() => {
+      this.resizeRendition(viewer);
+    });
+    this.resizeObserver.observe(viewer);
+
+    const savedLocation = this.getSavedReaderLocation(file.path);
+    void this.rendition.display(savedLocation || undefined).catch(() => {
+      void this.rendition?.display();
+    });
   }
 
-  private async openBook(): Promise<void> {
-    if (!this.epub || !this.frameEl) return;
-    if (this.chapters.length === 0) {
-      this.frameEl.srcdoc = "<p>No readable chapters were found in this EPUB.</p>";
-      return;
+  private applyReaderTheme(): void {
+    if (!this.rendition) return;
+    const colors = this.getReaderColors();
+    this.rendition.themes.default({
+      body: {
+        background: colors.background,
+        color: colors.text,
+        "font-family": "Georgia, 'Times New Roman', serif",
+        "line-height": "1.65"
+      },
+      "a, a:link, a:visited": {
+        color: colors.link
+      },
+      "img, svg": {
+        "max-width": "100% !important",
+        height: "auto !important"
+      }
+    });
+  }
+
+  private getReaderColors(): { background: string; link: string; text: string } {
+    const style = activeWindow.getComputedStyle(this.contentEl);
+    return {
+      background: style.getPropertyValue("--background-primary").trim() || "#ffffff",
+      link: style.getPropertyValue("--link-color").trim() || "#0b6bcb",
+      text: style.getPropertyValue("--text-normal").trim() || "#1f2328"
+    };
+  }
+
+  private resizeRendition(viewer: HTMLElement): void {
+    if (!this.rendition || viewer.clientWidth <= 0 || viewer.clientHeight <= 0) return;
+    this.rendition.resize(viewer.clientWidth, viewer.clientHeight);
+  }
+
+  private getSavedReaderLocation(filePath: string): string {
+    return activeWindow.localStorage.getItem(this.readerLocationKey(filePath)) || "";
+  }
+
+  private saveReaderLocation(filePath: string, cfi: string): void {
+    activeWindow.localStorage.setItem(this.readerLocationKey(filePath), cfi);
+  }
+
+  private readerLocationKey(filePath: string): string {
+    return `epub-transfer-to-markdown-location-${filePath}`;
+  }
+
+  private async cleanupReader(): Promise<void> {
+    if (this.keydownHandler) {
+      this.contentEl.removeEventListener("keydown", this.keydownHandler);
+      this.keydownHandler = null;
     }
-
-    const documentHtml = await prepareReaderBookHtml(this.epub, this.chapters);
-    this.frameEl.srcdoc = documentHtml;
-  }
-
-  private async cleanupTempDir(): Promise<void> {
-    if (!this.tempDir) return;
-    await rm(this.tempDir, { recursive: true, force: true }).catch(() => undefined);
-    this.tempDir = "";
-    this.extractDir = "";
-    this.epub = null;
-    this.chapters = [];
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.rendition?.destroy();
+    this.rendition = null;
+    this.book?.destroy();
+    this.book = null;
   }
 }
 
@@ -687,157 +779,6 @@ async function convertEpubForObsidian(options: {
 
   await writeFile(path.join(options.outputDir, "00 - Index.md"), buildIndex(options.bookName, chapters, options.keepSourceEpub));
   await writeFile(path.join(options.outputDir, "AI Reading Guide.md"), buildReadingGuide(options.bookName, chapters));
-}
-
-function buildReaderChapters(epub: EpubStructure): EpubReaderChapter[] {
-  const chapters: EpubReaderChapter[] = [];
-  let chapterNumber = 1;
-
-  for (const spineItem of epub.spine) {
-    const item = epub.manifest.get(spineItem.idref);
-    if (!item || !isHtmlItem(item)) continue;
-
-    const sourcePath = path.join(epub.opfDir, decodeUriPath(item.href));
-    const href = normalizeFilePath(path.relative(epub.opfDir, sourcePath));
-    const title = epub.navTitles.get(href) || `Chapter ${chapterNumber}`;
-    chapters.push({ href, title, sourcePath });
-    chapterNumber += 1;
-  }
-
-  return chapters;
-}
-
-async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderChapter[]): Promise<string> {
-  const sections = await Promise.all(
-    chapters.map(async (chapter) => {
-      const html = await readFile(chapter.sourcePath, "utf8");
-      const body = await prepareReaderSectionHtml(html, chapter.sourcePath, epub.opfDir);
-      return `<section class="epub-section" id="${escapeHtml(readerSectionId(chapter.href))}">${body}</section>`;
-    })
-  );
-
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  body {
-    background: #ffffff;
-    color: #1f2328;
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: 18px;
-    line-height: 1.65;
-    margin: 0 auto;
-    max-width: 820px;
-    padding: 40px 32px;
-  }
-  .epub-section + .epub-section {
-    border-top: 1px solid #e5e7eb;
-    margin-top: 48px;
-    padding-top: 48px;
-  }
-  img, svg {
-    max-width: 100%;
-    height: auto;
-  }
-  a {
-    color: #0b6bcb;
-  }
-</style>
-</head>
-<body>${sections.join("\n")}</body>
-</html>`;
-}
-
-async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir: string): Promise<string> {
-  let body = extractHtmlBody(html)
-    .replace(/<script\b[\s\S]*?<\/script>/gi, "")
-    .replace(/\s(src|href|xlink:href)=(["'])([^"']+)\2/gi, (_full, attr: string, quote: string, rawUrl: string) => {
-      return ` data-epub-attr=${quote}${attr}${quote} data-epub-resource=${quote}${rawUrl}${quote}`;
-    });
-
-  body = await replaceAsync(body, /\sdata-epub-attr=(["'])([^"']+)\1\sdata-epub-resource=(["'])([^"']+)\3/gi, async (_full, quote: string, attr: string, _resourceQuote: string, rawUrl: string) => {
-    const rewritten = await rewriteReaderResourceAttribute(attr, rawUrl, sourcePath, opfDir);
-    return ` ${attr}=${quote}${rewritten}${quote}`;
-  });
-
-  body = body.replace(/<svg\b[\s\S]*?<image\b[^>]*(?:href|xlink:href)=(["'])([^"']+)\1[^>]*>[\s\S]*?<\/svg>/gi, (_full, _quote: string, imageSrc: string) => {
-    return `<p><img src="${imageSrc}" /></p>`;
-  });
-
-  return body;
-}
-
-function extractHtmlBody(html: string): string {
-  return html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] || html;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-async function rewriteReaderResourceUrl(rawUrl: string, sourcePath: string, opfDir: string): Promise<string> {
-  if (/^(?:https?:|mailto:|#|data:)/i.test(rawUrl)) return rawUrl;
-
-  const cleanUrl = stripFragment(decodeUriPath(rawUrl));
-  const resourcePath = path.normalize(path.join(path.dirname(sourcePath), cleanUrl));
-  const relativePath = normalizeFilePath(path.relative(opfDir, resourcePath));
-  const dataUrl = await fileToDataUrl(resourcePath).catch(() => null);
-  return dataUrl || relativePath || rawUrl;
-}
-
-async function rewriteReaderResourceAttribute(attr: string, rawUrl: string, sourcePath: string, opfDir: string): Promise<string> {
-  if (/href$/i.test(attr)) {
-    return rewriteReaderHref(rawUrl, sourcePath, opfDir);
-  }
-
-  return rewriteReaderResourceUrl(rawUrl, sourcePath, opfDir);
-}
-
-function rewriteReaderHref(rawUrl: string, sourcePath: string, opfDir: string): string {
-  if (/^(?:https?:|mailto:|data:)/i.test(rawUrl)) return rawUrl;
-  if (rawUrl.startsWith("#")) return rawUrl;
-
-  const [pathPart] = rawUrl.split("#");
-  const decodedPath = decodeUriPath(pathPart);
-  const absoluteTarget = path.normalize(path.join(path.dirname(sourcePath), decodedPath));
-  const relativeTarget = normalizeFilePath(path.relative(opfDir, absoluteTarget));
-  return `#${readerSectionId(relativeTarget)}`;
-}
-
-function readerSectionId(href: string): string {
-  return `epub-${normalizeFilePath(stripFragment(href)).replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-}
-
-function sanitizeAnchorFragment(fragment: string): string {
-  return decodeUriPath(fragment).replace(/[^A-Za-z0-9_-]+/g, "-");
-}
-
-async function fileToDataUrl(filePath: string): Promise<string> {
-  const data = await readFile(filePath);
-  return `data:${mediaTypeForPath(filePath)};base64,${data.toString("base64")}`;
-}
-
-function mediaTypeForPath(filePath: string): string {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-  if (ext === ".png") return "image/png";
-  if (ext === ".gif") return "image/gif";
-  if (ext === ".svg") return "image/svg+xml";
-  if (ext === ".webp") return "image/webp";
-  if (ext === ".css") return "text/css";
-  return "application/octet-stream";
-}
-
-async function replaceAsync(source: string, pattern: RegExp, replacer: (...args: string[]) => Promise<string>): Promise<string> {
-  const matches = [...source.matchAll(pattern)];
-  const replacements = await Promise.all(matches.map((match) => replacer(...(match as unknown as string[]))));
-  let index = 0;
-  return source.replace(pattern, () => replacements[index++] ?? "");
 }
 
 async function exportMarkdownToEpub(options: {

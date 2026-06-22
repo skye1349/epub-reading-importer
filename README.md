@@ -62,7 +62,7 @@ If pandoc is installed somewhere else, open the plugin settings and enter the fu
 
 ### Read EPUB files
 
-Click an `.epub` file in the vault to open it with the built-in EPUB reader. The reader shows the book content in a single reading pane without adding a permanent sidebar. If the EPUB contains a table-of-contents page, it appears as part of the book content and internal links can jump within the book.
+Click an `.epub` file in the vault to open it with the built-in EPUB reader. The reader uses a paginated left/right reading mode, keeps EPUB images in place, and lets table-of-contents links jump through the book content.
 
 ### EPUB to Markdown
 
