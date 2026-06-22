@@ -6,6 +6,8 @@ This plugin is designed for people who keep books and reading notes in a local v
 
 It can also export an edited book folder back to EPUB and prepare a Send-to-Kindle email draft with the exported EPUB attached.
 
+It also registers an EPUB reader, so `.epub` files in the vault can be opened directly.
+
 ## What It Creates
 
 After importing an EPUB, the plugin creates a folder like this:
@@ -58,6 +60,10 @@ If pandoc is installed somewhere else, open the plugin settings and enter the fu
 
 ## How to Use
 
+### Read EPUB files
+
+Click an `.epub` file in the vault to open it with the built-in EPUB reader. The reader shows a chapter list and the selected chapter content.
+
 ### EPUB to Markdown
 
 1. Install and enable the plugin.
@@ -100,6 +106,8 @@ Books/Poor Charlies Almanack/Poor Charlies Almanack.epub
 ```
 
 If the source is a folder, Markdown files are exported in filename order. The plugin skips `00 - Index.md` and `AI Reading Guide.md` so they do not become book chapters.
+
+The exported EPUB includes a table of contents. If the source folder has a cover image such as `media/cover_image.jpg`, it is used as the EPUB cover. Markdown image links and Obsidian image embeds are converted for pandoc before export.
 
 After export, the plugin shows the output path and copies the full system path to the clipboard.
 

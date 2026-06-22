@@ -1,5 +1,6 @@
 import {
   App,
+  FileView,
   Modal,
   Notice,
   Platform,
@@ -8,6 +9,8 @@ import {
   Setting,
   TFile,
   TFolder,
+  ViewStateResult,
+  WorkspaceLeaf,
   normalizePath
 } from "obsidian";
 import { Buffer } from "buffer";
@@ -60,6 +63,7 @@ interface Chapter {
 
 interface EpubStructure {
   manifest: Map<string, ManifestItem>;
+  metadata: Map<string, string>;
   navItems: NavItem[];
   navTitles: Map<string, string>;
   opfDir: string;
@@ -83,6 +87,14 @@ interface ExportSource {
   bookName: string;
   isFolder: boolean;
 }
+
+interface EpubReaderChapter {
+  href: string;
+  title: string;
+  sourcePath: string;
+}
+
+const EPUB_VIEW_TYPE = "epub-transfer-to-markdown-reader";
 
 const DEFAULT_SETTINGS: EpubImporterSettings = {
   outputFolder: "Books",
@@ -134,6 +146,9 @@ export default class EpubReadingImporterPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+
+    this.registerView(EPUB_VIEW_TYPE, (leaf) => new EpubReaderView(leaf));
+    this.registerExtensions(["epub"], EPUB_VIEW_TYPE);
 
     this.addRibbonIcon("book-open", "Transfer EPUB to Markdown", () => {
       void this.importEpub();
@@ -329,6 +344,115 @@ class EpubReadingImporterSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+  }
+}
+
+class EpubReaderView extends FileView {
+  private tempDir = "";
+  private extractDir = "";
+  private epub: EpubStructure | null = null;
+  private chapters: EpubReaderChapter[] = [];
+  private chapterListEl: HTMLElement | null = null;
+  private frameEl: HTMLIFrameElement | null = null;
+
+  constructor(leaf: WorkspaceLeaf) {
+    super(leaf);
+    this.navigation = true;
+  }
+
+  getViewType(): string {
+    return EPUB_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return this.file?.basename || "EPUB reader";
+  }
+
+  canAcceptExtension(extension: string): boolean {
+    return extension.toLowerCase() === "epub";
+  }
+
+  async onLoadFile(file: TFile): Promise<void> {
+    await this.cleanupTempDir();
+    this.contentEl.empty();
+    this.contentEl.addClass("epub-reading-importer-reader");
+    this.contentEl.createEl("div", { text: "Loading EPUB...", cls: "epub-reading-importer-status" });
+
+    this.tempDir = path.join(os.tmpdir(), "epub-reading-importer-reader", `${Date.now()}-${randomId()}`);
+    this.extractDir = path.join(this.tempDir, "epub");
+    await mkdir(this.extractDir, { recursive: true });
+
+    const inputPath = path.join(this.tempDir, "source.epub");
+    await writeFile(inputPath, Buffer.from(await this.app.vault.readBinary(file)));
+    await extractEpub(inputPath, this.extractDir, this.tempDir);
+
+    this.epub = await readEpubStructure(this.extractDir);
+    this.chapters = buildReaderChapters(this.epub);
+    this.renderReader(file);
+  }
+
+  async onUnloadFile(_file: TFile): Promise<void> {
+    await this.cleanupTempDir();
+  }
+
+  async setState(state: unknown, result: ViewStateResult): Promise<void> {
+    await super.setState(state, result);
+  }
+
+  private renderReader(file: TFile): void {
+    this.contentEl.empty();
+    const shell = this.contentEl.createDiv({ cls: "epub-reading-importer-reader-shell" });
+    const sidebar = shell.createDiv({ cls: "epub-reading-importer-reader-sidebar" });
+    const title = this.epub?.title || file.basename;
+    sidebar.createEl("h2", { text: title });
+    this.chapterListEl = sidebar.createDiv({ cls: "epub-reading-importer-reader-chapters" });
+    const viewer = shell.createDiv({ cls: "epub-reading-importer-reader-viewer" });
+    this.frameEl = viewer.createEl("iframe", {
+      attr: {
+        sandbox: "allow-same-origin"
+      }
+    });
+
+    this.renderChapterList();
+    if (this.chapters[0]) {
+      void this.openChapter(0);
+    } else {
+      this.frameEl.srcdoc = "<p>No readable chapters were found in this EPUB.</p>";
+    }
+  }
+
+  private renderChapterList(): void {
+    if (!this.chapterListEl) return;
+    this.chapterListEl.empty();
+    this.chapters.forEach((chapter, index) => {
+      const button = this.chapterListEl!.createEl("button", {
+        text: chapter.title || `Chapter ${index + 1}`,
+        cls: "epub-reading-importer-reader-chapter"
+      });
+      button.addEventListener("click", () => {
+        void this.openChapter(index);
+      });
+    });
+  }
+
+  private async openChapter(index: number): Promise<void> {
+    const chapter = this.chapters[index];
+    if (!chapter || !this.epub || !this.frameEl) return;
+    const html = await readFile(chapter.sourcePath, "utf8");
+    const documentHtml = await prepareReaderHtml(html, chapter.sourcePath, this.epub.opfDir);
+    this.frameEl.srcdoc = documentHtml;
+    this.chapterListEl?.querySelectorAll("button").forEach((button, buttonIndex) => {
+      button.toggleClass("is-active", buttonIndex === index);
+    });
+  }
+
+  private async cleanupTempDir(): Promise<void> {
+    if (!this.tempDir) return;
+    await rm(this.tempDir, { recursive: true, force: true }).catch(() => undefined);
+    this.tempDir = "";
+    this.extractDir = "";
+    this.epub = null;
+    this.chapters = [];
   }
 }
 
@@ -550,6 +674,96 @@ async function convertEpubForObsidian(options: {
   await writeFile(path.join(options.outputDir, "AI Reading Guide.md"), buildReadingGuide(options.bookName, chapters));
 }
 
+function buildReaderChapters(epub: EpubStructure): EpubReaderChapter[] {
+  const chapters: EpubReaderChapter[] = [];
+  let chapterNumber = 1;
+
+  for (const spineItem of epub.spine) {
+    const item = epub.manifest.get(spineItem.idref);
+    if (!item || !isHtmlItem(item)) continue;
+
+    const sourcePath = path.join(epub.opfDir, decodeUriPath(item.href));
+    const href = normalizeFilePath(path.relative(epub.opfDir, sourcePath));
+    const title = epub.navTitles.get(href) || `Chapter ${chapterNumber}`;
+    chapters.push({ href, title, sourcePath });
+    chapterNumber += 1;
+  }
+
+  return chapters;
+}
+
+async function prepareReaderHtml(html: string, sourcePath: string, opfDir: string): Promise<string> {
+  let body = html
+    .replace(/<script\b[\s\S]*?<\/script>/gi, "")
+    .replace(/\s(?:src|href|xlink:href)=(["'])([^"']+)\1/gi, (_full, quote: string, rawUrl: string) => {
+      return ` data-epub-resource=${quote}${rawUrl}${quote}`;
+    });
+
+  body = await replaceAsync(body, /\sdata-epub-resource=(["'])([^"']+)\1/gi, async (_full, quote: string, rawUrl: string) => {
+    const rewritten = await rewriteReaderResourceUrl(rawUrl, sourcePath, opfDir);
+    return ` src=${quote}${rewritten}${quote}`;
+  });
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {
+    color: #1f2328;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 18px;
+    line-height: 1.65;
+    margin: 0 auto;
+    max-width: 780px;
+    padding: 32px;
+  }
+  img, svg {
+    max-width: 100%;
+    height: auto;
+  }
+  a {
+    color: #0b6bcb;
+  }
+</style>
+</head>
+<body>${body}</body>
+</html>`;
+}
+
+async function rewriteReaderResourceUrl(rawUrl: string, sourcePath: string, opfDir: string): Promise<string> {
+  if (/^(?:https?:|mailto:|#|data:)/i.test(rawUrl)) return rawUrl;
+
+  const cleanUrl = stripFragment(decodeUriPath(rawUrl));
+  const resourcePath = path.normalize(path.join(path.dirname(sourcePath), cleanUrl));
+  const relativePath = normalizeFilePath(path.relative(opfDir, resourcePath));
+  const dataUrl = await fileToDataUrl(resourcePath).catch(() => null);
+  return dataUrl || relativePath || rawUrl;
+}
+
+async function fileToDataUrl(filePath: string): Promise<string> {
+  const data = await readFile(filePath);
+  return `data:${mediaTypeForPath(filePath)};base64,${data.toString("base64")}`;
+}
+
+function mediaTypeForPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".svg") return "image/svg+xml";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".css") return "text/css";
+  return "application/octet-stream";
+}
+
+async function replaceAsync(source: string, pattern: RegExp, replacer: (...args: string[]) => Promise<string>): Promise<string> {
+  const matches = [...source.matchAll(pattern)];
+  const replacements = await Promise.all(matches.map((match) => replacer(...(match as unknown as string[]))));
+  let index = 0;
+  return source.replace(pattern, () => replacements[index++] ?? "");
+}
+
 async function exportMarkdownToEpub(options: {
   source: ExportSource;
   outputPath: string;
@@ -557,24 +771,40 @@ async function exportMarkdownToEpub(options: {
 }): Promise<void> {
   const pandoc = await resolveCommand("pandoc", getPandocCandidates(options.pandocPath));
   const markdownFiles = await collectExportMarkdownFiles(options.source);
+  const tempDir = path.join(os.tmpdir(), "epub-reading-importer-export", `${Date.now()}-${randomId()}`);
 
   if (markdownFiles.length === 0) {
     throw new Error("No Markdown files were found in the export source.");
   }
 
-  await mkdir(path.dirname(options.outputPath), { recursive: true });
-  await runCommand(pandoc, [
-    ...markdownFiles,
-    "--from=gfm",
-    "--to=epub3",
-    "--standalone",
-    "--metadata",
-    `title=${options.source.bookName}`,
-    "--resource-path",
-    options.source.isFolder ? options.source.absolutePath : path.dirname(options.source.absolutePath),
-    "-o",
-    options.outputPath
-  ]);
+  try {
+    const preparedMarkdownFiles = await prepareMarkdownFilesForExport(markdownFiles, tempDir);
+    const resourcePath = options.source.isFolder ? options.source.absolutePath : path.dirname(options.source.absolutePath);
+    const coverImage = await findCoverImage(resourcePath);
+    const args = [
+      ...preparedMarkdownFiles,
+      "--from=gfm",
+      "--to=epub3",
+      "--standalone",
+      "--toc",
+      "--toc-depth=3",
+      "--metadata",
+      `title=${options.source.bookName}`,
+      "--resource-path",
+      `${resourcePath}${path.delimiter}${tempDir}`,
+      "-o",
+      options.outputPath
+    ];
+
+    if (coverImage) {
+      args.splice(args.length - 2, 0, "--epub-cover-image", coverImage);
+    }
+
+    await mkdir(path.dirname(options.outputPath), { recursive: true });
+    await runCommand(pandoc, args);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 async function collectExportMarkdownFiles(source: ExportSource): Promise<string[]> {
@@ -594,6 +824,39 @@ async function collectExportMarkdownFiles(source: ExportSource): Promise<string[
     .filter((name) => !/^AI Reading Guide\.md$/i.test(name))
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }))
     .map((name) => path.join(source.absolutePath, name));
+}
+
+async function prepareMarkdownFilesForExport(markdownFiles: string[], tempDir: string): Promise<string[]> {
+  await mkdir(tempDir, { recursive: true });
+  const preparedFiles: string[] = [];
+
+  for (let index = 0; index < markdownFiles.length; index += 1) {
+    const sourcePath = markdownFiles[index];
+    const markdown = await readFile(sourcePath, "utf8");
+    const prepared = convertObsidianImageEmbeds(markdown);
+    const outputPath = path.join(tempDir, `${String(index + 1).padStart(3, "0")}-${path.basename(sourcePath)}`);
+    await writeFile(outputPath, prepared);
+    preparedFiles.push(outputPath);
+  }
+
+  return preparedFiles;
+}
+
+function convertObsidianImageEmbeds(markdown: string): string {
+  return markdown.replace(/!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g, (_full, target: string) => {
+    return `![](<${target.trim()}>)`;
+  });
+}
+
+async function findCoverImage(resourcePath: string): Promise<string | null> {
+  const mediaDir = path.join(resourcePath, "media");
+  const mediaEntries = await readdir(mediaDir, { withFileTypes: true }).catch(() => []);
+  const cover = mediaEntries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .find((name) => /^cover.*\.(?:jpe?g|png|webp)$/i.test(name));
+
+  return cover ? path.join(mediaDir, cover) : null;
 }
 
 function getExportDefaults(activeFile: TFile | null, settings: EpubImporterSettings): ExportPathRequest {
@@ -797,13 +1060,14 @@ async function readEpubStructure(extractDir: string): Promise<EpubStructure> {
   }
 
   const title = decodeEntities(opfXml.match(/<dc:title\b[^>]*>([\s\S]*?)<\/dc:title>/i)?.[1] || "");
+  const metadata = new Map<string, string>([["title", title]]);
   const navItems = await readNavItems(manifest, opfDir);
   const navTitles = new Map<string, string>();
   for (const item of navItems) {
     if (!navTitles.has(item.href)) navTitles.set(item.href, item.title);
   }
 
-  return { manifest, navItems, navTitles, opfDir, spine, title };
+  return { manifest, metadata, navItems, navTitles, opfDir, spine, title };
 }
 
 async function readNavItems(manifest: Map<string, ManifestItem>, opfDir: string): Promise<NavItem[]> {
