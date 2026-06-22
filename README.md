@@ -71,20 +71,46 @@ You can also click the book icon in the left ribbon.
 
 ### Markdown back to EPUB
 
-1. Open any chapter note from a generated book folder.
-2. Open the command palette.
-3. Run `Export current book to EPUB`.
-4. The plugin creates a new `.epub` file in the same book folder.
+1. Open the command palette.
+2. Run `Export Markdown to EPUB`.
+3. Enter the source Markdown file or folder.
+4. Optionally enter the output EPUB path.
+5. Run the export.
 
-The export command uses the Markdown files in the current book folder, sorted by filename. It skips `00 - Index.md` and `AI Reading Guide.md` so they do not become book chapters.
+The source can be a folder:
+
+```text
+Judgement/Poor Charlies Almanack
+```
+
+Or a single Markdown file:
+
+```text
+Judgement/Poor Charlies Almanack/01 - Dedication.md
+```
+
+The output can be blank, a folder, or a full `.epub` path.
+
+Source paths can be vault-relative paths. Output paths can be vault-relative paths or full system paths.
+
+If output is blank, the plugin saves the EPUB next to the source:
+
+```text
+Judgement/Poor Charlies Almanack/Poor Charlies Almanack.epub
+```
+
+If the source is a folder, Markdown files are exported in filename order. The plugin skips `00 - Index.md` and `AI Reading Guide.md` so they do not become book chapters.
+
+After export, the plugin shows the output path and copies the full system path to the clipboard.
 
 ### Send to Kindle
 
 1. Set your Kindle email in the plugin settings.
-2. Open any chapter note from a generated book folder.
-3. Run `Export current book to EPUB for Kindle`.
-4. The plugin creates an EPUB and opens an email draft with the EPUB attached.
-5. Review the draft and send it from your mail client.
+2. Run `Export Markdown to EPUB for Kindle`.
+3. Enter the source Markdown file or folder.
+4. Optionally enter the output EPUB path.
+5. The plugin creates an EPUB and opens an email draft with the EPUB attached.
+6. Review the draft and send it from your mail client.
 
 Kindle delivery uses your Kindle email address, such as `name_123@kindle.com`. Your sending email address must also be approved in your Amazon Kindle document settings.
 
@@ -131,7 +157,7 @@ EPUB files vary a lot. Some books contain clean chapter HTML, while others conta
 
 ### EPUB export fails
 
-Make sure pandoc is installed and the current note is inside a generated book folder. The folder should contain chapter Markdown files such as `01 - Introduction.md` or `02 - Chapter 1.md`.
+Make sure pandoc is installed and the source path exists. A folder source should contain chapter Markdown files such as `01 - Introduction.md` or `02 - Chapter 1.md`. A file source must be a `.md` file.
 
 ### Kindle delivery does not open an email draft
 

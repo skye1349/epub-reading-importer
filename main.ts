@@ -1,5 +1,6 @@
 import {
   App,
+  Modal,
   Notice,
   Platform,
   Plugin,
@@ -29,6 +30,8 @@ interface EpubImporterSettings {
   outputFolder: string;
   pandocPath: string;
   kindleEmail: string;
+  lastExportSource: string;
+  lastExportOutput: string;
   keepSourceEpub: boolean;
   openIndexAfterImport: boolean;
 }
@@ -69,10 +72,24 @@ interface Section {
   markdown: string;
 }
 
+interface ExportPathRequest {
+  sourcePath: string;
+  outputPath: string;
+}
+
+interface ExportSource {
+  absolutePath: string;
+  displayPath: string;
+  bookName: string;
+  isFolder: boolean;
+}
+
 const DEFAULT_SETTINGS: EpubImporterSettings = {
   outputFolder: "Books",
   pandocPath: "",
   kindleEmail: "",
+  lastExportSource: "",
+  lastExportOutput: "",
   keepSourceEpub: true,
   openIndexAfterImport: true
 };
@@ -93,6 +110,14 @@ function parseSettings(data: unknown): Partial<EpubImporterSettings> {
   }
   if (typeof raw.kindleEmail === "string") {
     settings.kindleEmail = raw.kindleEmail;
+  }
+  if (typeof raw.lastExportSource === "string") {
+    settings.lastExportSource = raw.lastExportSource;
+  } else if (typeof (raw as Record<string, unknown>).lastExportFolder === "string") {
+    settings.lastExportSource = (raw as Record<string, string>).lastExportFolder;
+  }
+  if (typeof raw.lastExportOutput === "string") {
+    settings.lastExportOutput = raw.lastExportOutput;
   }
   if (typeof raw.keepSourceEpub === "boolean") {
     settings.keepSourceEpub = raw.keepSourceEpub;
@@ -124,17 +149,17 @@ export default class EpubReadingImporterPlugin extends Plugin {
 
     this.addCommand({
       id: "export-current-book-to-epub",
-      name: "Export current book to EPUB",
+      name: "Export Markdown to EPUB",
       callback: () => {
-        void this.exportCurrentBook(false);
+        void this.exportFolder(false);
       }
     });
 
     this.addCommand({
       id: "export-current-book-to-kindle",
-      name: "Export current book to EPUB for Kindle",
+      name: "Export Markdown to EPUB for Kindle",
       callback: () => {
-        void this.exportCurrentBook(true);
+        void this.exportFolder(true);
       }
     });
 
@@ -193,39 +218,41 @@ export default class EpubReadingImporterPlugin extends Plugin {
     }
   }
 
-  private async exportCurrentBook(forKindle: boolean) {
+  private async exportFolder(forKindle: boolean) {
     if (!Platform.isDesktopApp) {
       new Notice("EPUB export needs Obsidian desktop.");
       return;
     }
 
     try {
-      const activeFile = this.app.workspace.getActiveFile();
-      if (!activeFile) {
-        new Notice("Open a Markdown file inside an imported book first.");
-        return;
-      }
-
       const vaultBasePath = getVaultBasePath(this.app);
-      const bookFolder = getBookFolder(activeFile);
-      const bookDir = path.join(vaultBasePath, bookFolder.path);
-      const bookName = sanitizeBookName(bookFolder.name || activeFile.basename);
-      const outputPath = path.join(bookDir, `${bookName}.epub`);
+      const defaults = getExportDefaults(this.app.workspace.getActiveFile(), this.settings);
+      const exportRequest = await promptForExportPaths(this.app, defaults.sourcePath, defaults.outputPath, forKindle);
+      if (!exportRequest) return;
+
+      const source = await resolveExportSource(exportRequest.sourcePath, vaultBasePath);
+      const outputPath = resolveExportOutputPath(exportRequest.outputPath, source, vaultBasePath);
+      const outputDisplayPath = getDisplayPath(outputPath, vaultBasePath);
+      this.settings.lastExportSource = source.displayPath;
+      this.settings.lastExportOutput = exportRequest.outputPath.trim();
+      await this.saveSettings();
 
       new Notice("Exporting EPUB...");
-      await exportBookFolderToEpub({
-        bookDir,
-        bookName,
+      await exportMarkdownToEpub({
+        source,
         outputPath,
         pandocPath: this.settings.pandocPath
       });
 
       if (forKindle) {
         await prepareKindleDelivery(outputPath, this.settings.kindleEmail);
+        await copyTextToClipboard(outputPath);
+        new Notice(`Exported EPUB to ${outputDisplayPath}. Full path copied.`);
         return;
       }
 
-      new Notice(`Exported EPUB to ${bookFolder.path}/${path.basename(outputPath)}`);
+      await copyTextToClipboard(outputPath);
+      new Notice(`Exported EPUB to ${outputDisplayPath}. Full path copied.`);
     } catch (error) {
       new Notice(error instanceof Error ? error.message : "EPUB export failed.");
     }
@@ -303,6 +330,111 @@ class EpubReadingImporterSettingTab extends PluginSettingTab {
         })
       );
   }
+}
+
+class ExportPathsModal extends Modal {
+  private sourcePath: string;
+  private outputPath: string;
+  private readonly forKindle: boolean;
+  private readonly onSubmit: (request: ExportPathRequest | null) => void;
+  private submitted = false;
+
+  constructor(app: App, defaultSource: string, defaultOutput: string, forKindle: boolean, onSubmit: (request: ExportPathRequest | null) => void) {
+    super(app);
+    this.sourcePath = defaultSource;
+    this.outputPath = defaultOutput;
+    this.forKindle = forKindle;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    this.titleEl.setText(this.forKindle ? "Export Markdown to EPUB for Kindle" : "Export Markdown to EPUB");
+    contentEl.empty();
+
+    contentEl.createEl("p", {
+      text: "Enter a Markdown file or a folder of Markdown chapters. The output path is optional."
+    });
+
+    const sourceSetting = new Setting(contentEl)
+      .setName("Source file or folder")
+      .setDesc("Example: Judgement/Poor Charlies Almanack or Judgement/Poor Charlies Almanack/01 - Dedication.md")
+      .addText((text) => {
+        text
+          .setPlaceholder("Judgement/Poor Charlies Almanack")
+          .setValue(this.sourcePath)
+          .onChange((value) => {
+            this.sourcePath = value;
+          });
+        text.inputEl.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            this.submit();
+          }
+        });
+      });
+
+    sourceSetting.settingEl.addClass("epub-reading-importer-path-setting");
+
+    const outputSetting = new Setting(contentEl)
+      .setName("Output EPUB path")
+      .setDesc("Optional. Leave blank to save next to the source. You can enter a folder or a .epub path.")
+      .addText((text) => {
+        text
+          .setPlaceholder("Judgement/Poor Charlies Almanack.epub")
+          .setValue(this.outputPath)
+          .onChange((value) => {
+            this.outputPath = value;
+          });
+        text.inputEl.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            this.submit();
+          }
+        });
+      });
+
+    outputSetting.settingEl.addClass("epub-reading-importer-path-setting");
+
+    new Setting(contentEl)
+      .addButton((button) =>
+        button
+          .setButtonText("Cancel")
+          .onClick(() => {
+            this.close();
+          })
+      )
+      .addButton((button) =>
+        button
+          .setCta()
+          .setButtonText(this.forKindle ? "Export for Kindle" : "Export EPUB")
+          .onClick(() => {
+            this.submit();
+          })
+      );
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (!this.submitted) {
+      this.onSubmit(null);
+    }
+  }
+
+  private submit() {
+    this.submitted = true;
+    this.onSubmit({
+      sourcePath: this.sourcePath.trim(),
+      outputPath: this.outputPath.trim()
+    });
+    this.close();
+  }
+}
+
+function promptForExportPaths(app: App, defaultSource: string, defaultOutput: string, forKindle: boolean): Promise<ExportPathRequest | null> {
+  return new Promise((resolve) => {
+    new ExportPathsModal(app, defaultSource, defaultOutput, forKindle, resolve).open();
+  });
 }
 
 function selectEpubFile(): Promise<File | null> {
@@ -418,40 +550,42 @@ async function convertEpubForObsidian(options: {
   await writeFile(path.join(options.outputDir, "AI Reading Guide.md"), buildReadingGuide(options.bookName, chapters));
 }
 
-async function exportBookFolderToEpub(options: {
-  bookDir: string;
-  bookName: string;
+async function exportMarkdownToEpub(options: {
+  source: ExportSource;
   outputPath: string;
   pandocPath: string;
 }): Promise<void> {
   const pandoc = await resolveCommand("pandoc", getPandocCandidates(options.pandocPath));
-  const markdownFiles = await collectBookMarkdownFiles(options.bookDir);
+  const markdownFiles = await collectExportMarkdownFiles(options.source);
 
   if (markdownFiles.length === 0) {
-    throw new Error("No chapter Markdown files were found in the current book folder.");
+    throw new Error("No Markdown files were found in the export source.");
   }
 
+  await mkdir(path.dirname(options.outputPath), { recursive: true });
   await runCommand(pandoc, [
     ...markdownFiles,
     "--from=gfm",
     "--to=epub3",
     "--standalone",
     "--metadata",
-    `title=${options.bookName}`,
+    `title=${options.source.bookName}`,
     "--resource-path",
-    options.bookDir,
+    options.source.isFolder ? options.source.absolutePath : path.dirname(options.source.absolutePath),
     "-o",
     options.outputPath
   ]);
 }
 
-async function collectBookMarkdownFiles(bookDir: string): Promise<string[]> {
-  const entries = await stat(bookDir).catch(() => null);
-  if (!entries?.isDirectory()) {
-    throw new Error("The current book folder was not found.");
+async function collectExportMarkdownFiles(source: ExportSource): Promise<string[]> {
+  if (!source.isFolder) {
+    if (!/\.md$/i.test(source.absolutePath)) {
+      throw new Error("The export source file must be a Markdown file.");
+    }
+    return [source.absolutePath];
   }
 
-  const folderEntries = await readdir(bookDir, { withFileTypes: true });
+  const folderEntries = await readdir(source.absolutePath, { withFileTypes: true });
   return folderEntries
     .filter((entry) => entry.isFile())
     .map((entry) => entry.name)
@@ -459,7 +593,83 @@ async function collectBookMarkdownFiles(bookDir: string): Promise<string[]> {
     .filter((name) => !/^00\s*-\s*Index\.md$/i.test(name))
     .filter((name) => !/^AI Reading Guide\.md$/i.test(name))
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }))
-    .map((name) => path.join(bookDir, name));
+    .map((name) => path.join(source.absolutePath, name));
+}
+
+function getExportDefaults(activeFile: TFile | null, settings: EpubImporterSettings): ExportPathRequest {
+  if (settings.lastExportSource || settings.lastExportOutput) {
+    return {
+      sourcePath: settings.lastExportSource,
+      outputPath: settings.lastExportOutput
+    };
+  }
+
+  if (!activeFile) {
+    return { sourcePath: "", outputPath: "" };
+  }
+
+  try {
+    return { sourcePath: getBookFolder(activeFile).path, outputPath: "" };
+  } catch {
+    return { sourcePath: activeFile.path, outputPath: "" };
+  }
+}
+
+async function resolveExportSource(sourcePath: string, vaultBasePath: string): Promise<ExportSource> {
+  const trimmed = sourcePath.trim();
+  if (!trimmed) {
+    throw new Error("Enter a Markdown file or folder before exporting.");
+  }
+
+  const absolutePath = resolveInputPath(trimmed, vaultBasePath);
+  const info = await stat(absolutePath).catch(() => null);
+  if (!info) {
+    throw new Error("The export source was not found.");
+  }
+
+  const isFolder = info.isDirectory();
+  if (!isFolder && !info.isFile()) {
+    throw new Error("The export source must be a Markdown file or a folder.");
+  }
+
+  const displayPath = getDisplayPath(absolutePath, vaultBasePath);
+  const bookName = sanitizeBookName(isFolder ? path.basename(absolutePath) : path.basename(absolutePath, path.extname(absolutePath)));
+  return { absolutePath, displayPath, bookName, isFolder };
+}
+
+function resolveExportOutputPath(outputPath: string, source: ExportSource, vaultBasePath: string): string {
+  const trimmed = outputPath.trim();
+  if (!trimmed) {
+    const baseDir = source.isFolder ? source.absolutePath : path.dirname(source.absolutePath);
+    return path.join(baseDir, `${source.bookName}.epub`);
+  }
+
+  const absolutePath = resolveInputPath(trimmed, vaultBasePath);
+  if (/\.epub$/i.test(absolutePath)) {
+    return absolutePath;
+  }
+
+  return path.join(absolutePath, `${source.bookName}.epub`);
+}
+
+function resolveInputPath(inputPath: string, vaultBasePath: string): string {
+  if (path.isAbsolute(inputPath)) {
+    return path.normalize(inputPath);
+  }
+
+  return path.join(vaultBasePath, normalizePath(inputPath.replace(/^\/+/, "")));
+}
+
+function getDisplayPath(absolutePath: string, vaultBasePath: string): string {
+  const normalizedAbsolute = normalizeFilePath(absolutePath);
+  const normalizedVault = normalizeFilePath(vaultBasePath);
+  if (normalizedAbsolute === normalizedVault) {
+    return "/";
+  }
+  if (normalizedAbsolute.startsWith(`${normalizedVault}/`)) {
+    return normalizePath(normalizedAbsolute.slice(normalizedVault.length + 1));
+  }
+  return absolutePath;
 }
 
 function getBookFolder(activeFile: TFile): TFolder {
@@ -497,6 +707,10 @@ async function prepareKindleDelivery(epubPath: string, kindleEmail: string): Pro
   }
 
   throw new Error("Kindle email draft creation is only supported on macOS Mail and Windows Outlook.");
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  await activeWindow.navigator.clipboard.writeText(value).catch(() => undefined);
 }
 
 async function prepareKindleDeliveryWithAppleMail(epubPath: string, kindleEmail: string): Promise<void> {

@@ -2,3 +2,7 @@
   color: var(--text-muted);
   font-size: var(--font-ui-small);
 }
+
+.epub-reading-importer-path-setting input {
+  min-width: min(34rem, 100%);
+}
