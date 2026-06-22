@@ -388,10 +388,13 @@ class EpubReadingImporterSettingTab extends PluginSettingTab {
 
 class EpubReaderView extends FileView {
   private chapters: EpubReaderChapter[] = [];
+  private currentReaderPage = 0;
   private epub: EpubStructure | null = null;
   private extractDir = "";
   private frameEl: HTMLIFrameElement | null = null;
   private keydownHandler: ((event: KeyboardEvent) => void) | null = null;
+  private pendingReaderFragment = "";
+  private readerPages: string[] = [];
   private tempDir = "";
 
   constructor(leaf: WorkspaceLeaf) {
@@ -473,7 +476,7 @@ class EpubReaderView extends FileView {
       }
     });
 
-  if (!this.epub || this.chapters.length === 0) {
+    if (!this.epub || this.chapters.length === 0) {
       statusEl.setText("No readable chapters were found in this EPUB.");
       statusEl.addClass("epub-reading-importer-reader-error");
       return;
@@ -500,10 +503,16 @@ class EpubReaderView extends FileView {
     this.contentEl.addEventListener("keydown", this.keydownHandler);
 
     try {
-      const html = await prepareReaderBookHtml(this.epub, this.chapters, this.getReaderColors());
-      this.frameEl.srcdoc = html;
+      const pageByHref = buildReaderPageMap(this.chapters);
+      this.readerPages = await Promise.all(
+        this.chapters.map((chapter) => prepareReaderPageHtml(this.epub as EpubStructure, chapter, this.getReaderColors(), pageByHref))
+      );
+      this.frameEl.onload = () => {
+        this.bindReaderPageLinks();
+        this.scrollToPendingReaderFragment();
+      };
+      this.setReaderPage(0);
       await waitForAnimationFrame();
-      this.normalizeReaderScrollPosition();
       statusEl.remove();
       this.contentEl.focus();
     } catch (error) {
@@ -522,23 +531,37 @@ class EpubReaderView extends FileView {
   }
 
   private turnReaderPage(direction: -1 | 1): void {
-    const scrollingElement = this.getFrameScrollingElement();
-    if (!scrollingElement || !this.frameEl) return;
-
-    const pageWidth = Math.max(320, Math.floor(this.frameEl.clientWidth));
-    const nextLeft = clampScrollLeft(scrollingElement.scrollLeft + direction * pageWidth, scrollingElement);
-    scrollingElement.scrollTo({ left: nextLeft, behavior: "smooth" });
+    this.setReaderPage(this.currentReaderPage + direction);
   }
 
-  private normalizeReaderScrollPosition(): void {
-    const scrollingElement = this.getFrameScrollingElement();
-    if (!scrollingElement) return;
-    scrollingElement.scrollLeft = 0;
+  private setReaderPage(index: number, fragment = ""): void {
+    if (!this.frameEl || this.readerPages.length === 0) return;
+    const nextIndex = Math.min(this.readerPages.length - 1, Math.max(0, index));
+    this.currentReaderPage = nextIndex;
+    this.pendingReaderFragment = fragment;
+    this.frameEl.srcdoc = this.readerPages[nextIndex];
   }
 
-  private getFrameScrollingElement(): HTMLElement | null {
+  private bindReaderPageLinks(): void {
     const frameDocument = this.frameEl?.contentDocument;
-    return (frameDocument?.scrollingElement as HTMLElement | null) || frameDocument?.documentElement || null;
+    if (!frameDocument) return;
+
+    frameDocument.querySelectorAll<HTMLAnchorElement>("a[href^='epub-reader-page:']").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        const target = parseReaderPageHref(link.getAttribute("href") || "");
+        if (!target) return;
+        this.setReaderPage(target.index, target.fragment);
+      });
+    });
+  }
+
+  private scrollToPendingReaderFragment(): void {
+    if (!this.pendingReaderFragment) return;
+    const frameDocument = this.frameEl?.contentDocument;
+    const target = frameDocument?.getElementById(this.pendingReaderFragment);
+    target?.scrollIntoView();
+    this.pendingReaderFragment = "";
   }
 
   private async cleanupReader(): Promise<void> {
@@ -549,6 +572,9 @@ class EpubReaderView extends FileView {
     this.frameEl = null;
     this.epub = null;
     this.chapters = [];
+    this.currentReaderPage = 0;
+    this.pendingReaderFragment = "";
+    this.readerPages = [];
     if (this.tempDir) {
       await rm(this.tempDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -557,9 +583,13 @@ class EpubReaderView extends FileView {
   }
 }
 
-function clampScrollLeft(value: number, element: HTMLElement): number {
-  const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
-  return Math.min(maxScrollLeft, Math.max(0, value));
+function parseReaderPageHref(href: string): { fragment: string; index: number } | null {
+  const match = href.match(/^epub-reader-page:(\d+)(?:#(.+))?$/);
+  if (!match) return null;
+  return {
+    fragment: match[2] ? decodeUriPath(match[2]) : "",
+    index: Number(match[1])
+  };
 }
 
 class ExportPathsModal extends Modal {
@@ -801,14 +831,22 @@ function buildReaderChapters(epub: EpubStructure): EpubReaderChapter[] {
   return chapters;
 }
 
-async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderChapter[], colors: { background: string; link: string; text: string }): Promise<string> {
-  const sections = await Promise.all(
-    chapters.map(async (chapter) => {
-      const html = await readFile(chapter.sourcePath, "utf8");
-      const body = await prepareReaderSectionHtml(html, chapter.sourcePath, epub.opfDir);
-      return `<section class="epub-section" id="${escapeAttribute(readerSectionId(chapter.href))}">${body}</section>`;
-    })
-  );
+function buildReaderPageMap(chapters: EpubReaderChapter[]): Map<string, number> {
+  const pageByHref = new Map<string, number>();
+  chapters.forEach((chapter, index) => {
+    pageByHref.set(stripFragment(chapter.href), index);
+  });
+  return pageByHref;
+}
+
+async function prepareReaderPageHtml(
+  epub: EpubStructure,
+  chapter: EpubReaderChapter,
+  colors: { background: string; link: string; text: string },
+  pageByHref: Map<string, number>
+): Promise<string> {
+  const html = await readFile(chapter.sourcePath, "utf8");
+  const body = await prepareReaderSectionHtml(html, chapter.sourcePath, epub.opfDir, pageByHref);
 
   return `<!doctype html>
 <html>
@@ -819,19 +857,18 @@ async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderCh
   body {
     height: 100%;
     margin: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
   body {
     background: ${colors.background};
     box-sizing: border-box;
     color: ${colors.text};
-    column-fill: auto;
-    column-gap: 80px;
-    column-width: calc(100vw - 112px);
     font-family: Georgia, "Times New Roman", serif;
     font-size: 18px;
     line-height: 1.65;
+    margin: 0 auto;
+    max-width: 920px;
     padding: 38px 56px;
   }
   img,
@@ -842,12 +879,11 @@ async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderCh
   }
   .epub-reader-image-page {
     align-items: center;
-    break-inside: avoid;
     display: flex;
-    height: calc(100vh - 76px);
+    min-height: calc(100vh - 76px);
     justify-content: center;
     margin: 0;
-    width: calc(100vw - 112px);
+    width: 100%;
   }
   .epub-reader-image-page img {
     height: auto !important;
@@ -859,22 +895,19 @@ async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderCh
   a {
     color: ${colors.link};
   }
-  .epub-section {
-    break-after: column;
-  }
   * {
     max-width: 100%;
   }
 </style>
 </head>
-<body>${sections.join("\n")}</body>
+<body><main id="${escapeAttribute(readerSectionId(chapter.href))}">${body}</main></body>
 </html>`;
 }
 
-async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir: string): Promise<string> {
+async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir: string, pageByHref: Map<string, number>): Promise<string> {
   const body = extractHtmlBody(html).replace(/<script\b[\s\S]*?<\/script>/gi, "");
   const rewritten = await replaceAsync(body, /<([A-Za-z][\w:-]*)\b([^>]*)>/g, async (full: string, tagName: string, attrs: string) => {
-    const updatedAttrs = await rewriteReaderAttributes(tagName.toLowerCase(), attrs, sourcePath, opfDir);
+    const updatedAttrs = await rewriteReaderAttributes(tagName.toLowerCase(), attrs, sourcePath, opfDir, pageByHref);
     return `<${tagName}${updatedAttrs}>`;
   });
 
@@ -889,31 +922,32 @@ function flattenSvgImageWrappers(html: string): string {
   });
 }
 
-async function rewriteReaderAttributes(tagName: string, attrs: string, sourcePath: string, opfDir: string): Promise<string> {
+async function rewriteReaderAttributes(tagName: string, attrs: string, sourcePath: string, opfDir: string, pageByHref: Map<string, number>): Promise<string> {
   return replaceAsync(attrs, /\s(src|href|xlink:href)=("([^"]*)"|'([^']*)')/gi, async (full: string, attr: string, quotedValue: string, doubleValue = "", singleValue = "") => {
     const rawUrl = doubleValue || singleValue;
     const quote = quotedValue.startsWith("'") ? "'" : "\"";
-    const value = await rewriteReaderAttributeValue(tagName, attr, rawUrl, sourcePath, opfDir);
+    const value = await rewriteReaderAttributeValue(tagName, attr, rawUrl, sourcePath, opfDir, pageByHref);
     return ` ${attr}=${quote}${escapeAttribute(value)}${quote}`;
   });
 }
 
-async function rewriteReaderAttributeValue(tagName: string, attr: string, rawUrl: string, sourcePath: string, opfDir: string): Promise<string> {
+async function rewriteReaderAttributeValue(tagName: string, attr: string, rawUrl: string, sourcePath: string, opfDir: string, pageByHref: Map<string, number>): Promise<string> {
   if (/^(?:https?:|mailto:|data:)/i.test(rawUrl)) return rawUrl;
   if (attr.toLowerCase() === "href" && tagName === "a") {
-    return rewriteReaderLink(rawUrl, sourcePath, opfDir);
+    return rewriteReaderLink(rawUrl, sourcePath, opfDir, pageByHref);
   }
   return readerResourceToDataUrl(rawUrl, sourcePath);
 }
 
-function rewriteReaderLink(rawUrl: string, sourcePath: string, opfDir: string): string {
+function rewriteReaderLink(rawUrl: string, sourcePath: string, opfDir: string, pageByHref: Map<string, number>): string {
   if (rawUrl.startsWith("#")) return rawUrl;
 
   const [pathPart, fragment = ""] = rawUrl.split("#");
   const targetPath = path.normalize(path.join(path.dirname(sourcePath), decodeUriPath(pathPart)));
   const targetHref = normalizeFilePath(path.relative(opfDir, targetPath));
-  if (fragment) return `#${decodeUriPath(fragment)}`;
-  return `#${readerSectionId(targetHref)}`;
+  const pageIndex = pageByHref.get(stripFragment(targetHref));
+  if (pageIndex === undefined) return rawUrl;
+  return `epub-reader-page:${pageIndex}${fragment ? `#${decodeUriPath(fragment)}` : ""}`;
 }
 
 async function readerResourceToDataUrl(rawUrl: string, sourcePath: string): Promise<string> {
