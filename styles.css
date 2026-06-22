@@ -52,6 +52,13 @@
   width: 100%;
 }
 
+.epub-reading-importer-reader-viewer iframe {
+  background: var(--background-primary);
+  border: 0;
+  height: 100%;
+  width: 100%;
+}
+
 .epub-reading-importer-reader-loading {
   color: var(--text-muted);
   font-size: var(--font-ui-small);

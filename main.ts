@@ -473,7 +473,7 @@ class EpubReaderView extends FileView {
       }
     });
 
-    if (!this.epub || this.chapters.length === 0) {
+  if (!this.epub || this.chapters.length === 0) {
       statusEl.setText("No readable chapters were found in this EPUB.");
       statusEl.addClass("epub-reading-importer-reader-error");
       return;
@@ -503,6 +503,7 @@ class EpubReaderView extends FileView {
       const html = await prepareReaderBookHtml(this.epub, this.chapters, this.getReaderColors());
       this.frameEl.srcdoc = html;
       await waitForAnimationFrame();
+      this.normalizeReaderScrollPosition();
       statusEl.remove();
       this.contentEl.focus();
     } catch (error) {
@@ -521,12 +522,23 @@ class EpubReaderView extends FileView {
   }
 
   private turnReaderPage(direction: -1 | 1): void {
-    const frameWindow = this.frameEl?.contentWindow;
-    if (!frameWindow || !this.frameEl) return;
-    frameWindow.scrollBy({
-      left: direction * Math.max(320, Math.floor(this.frameEl.clientWidth * 0.88)),
-      behavior: "smooth"
-    });
+    const scrollingElement = this.getFrameScrollingElement();
+    if (!scrollingElement || !this.frameEl) return;
+
+    const pageWidth = Math.max(320, Math.floor(this.frameEl.clientWidth));
+    const nextLeft = clampScrollLeft(scrollingElement.scrollLeft + direction * pageWidth, scrollingElement);
+    scrollingElement.scrollTo({ left: nextLeft, behavior: "smooth" });
+  }
+
+  private normalizeReaderScrollPosition(): void {
+    const scrollingElement = this.getFrameScrollingElement();
+    if (!scrollingElement) return;
+    scrollingElement.scrollLeft = 0;
+  }
+
+  private getFrameScrollingElement(): HTMLElement | null {
+    const frameDocument = this.frameEl?.contentDocument;
+    return (frameDocument?.scrollingElement as HTMLElement | null) || frameDocument?.documentElement || null;
   }
 
   private async cleanupReader(): Promise<void> {
@@ -543,6 +555,11 @@ class EpubReaderView extends FileView {
     this.tempDir = "";
     this.extractDir = "";
   }
+}
+
+function clampScrollLeft(value: number, element: HTMLElement): number {
+  const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+  return Math.min(maxScrollLeft, Math.max(0, value));
 }
 
 class ExportPathsModal extends Modal {
@@ -809,6 +826,7 @@ async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderCh
     background: ${colors.background};
     box-sizing: border-box;
     color: ${colors.text};
+    column-fill: auto;
     column-gap: 80px;
     column-width: calc(100vw - 112px);
     font-family: Georgia, "Times New Roman", serif;
@@ -821,6 +839,22 @@ async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderCh
     break-inside: avoid;
     height: auto;
     max-width: 100%;
+  }
+  .epub-reader-image-page {
+    align-items: center;
+    break-inside: avoid;
+    display: flex;
+    height: calc(100vh - 76px);
+    justify-content: center;
+    margin: 0;
+    width: calc(100vw - 112px);
+  }
+  .epub-reader-image-page img {
+    height: auto !important;
+    max-height: 100%;
+    max-width: 100%;
+    object-fit: contain;
+    width: auto !important;
   }
   a {
     color: ${colors.link};
@@ -844,7 +878,15 @@ async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir
     return `<${tagName}${updatedAttrs}>`;
   });
 
-  return rewritten.replace(/\son[a-z]+\s*=\s*(["']).*?\1/gi, "");
+  return flattenSvgImageWrappers(rewritten).replace(/\son[a-z]+\s*=\s*(["']).*?\1/gi, "");
+}
+
+function flattenSvgImageWrappers(html: string): string {
+  return html.replace(/<svg\b[\s\S]*?<image\b([^>]*)\/?>[\s\S]*?<\/svg>/gi, (_full: string, attrs: string) => {
+    const src = attrs.match(/\s(?:href|xlink:href)=("([^"]*)"|'([^']*)')/i)?.[2] || attrs.match(/\s(?:href|xlink:href)=("([^"]*)"|'([^']*)')/i)?.[3] || "";
+    if (!src) return _full;
+    return `<p class="epub-reader-image-page"><img src="${escapeAttribute(src)}" alt="" /></p>`;
+  });
 }
 
 async function rewriteReaderAttributes(tagName: string, attrs: string, sourcePath: string, opfDir: string): Promise<string> {
