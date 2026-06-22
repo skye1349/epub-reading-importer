@@ -495,15 +495,15 @@ class EpubReaderView extends FileView {
     this.contentEl.tabIndex = 0;
     this.contentEl.addEventListener("keydown", this.keydownHandler);
 
-    this.resizeObserver = new ResizeObserver(() => {
-      this.resizeRendition(viewer);
-    });
-    this.resizeObserver.observe(viewer);
-
     try {
       await this.book.ready;
+      await this.rendition.started;
       await waitForAnimationFrame();
       this.resizeRendition(viewer);
+      this.resizeObserver = new ResizeObserver(() => {
+        this.resizeRendition(viewer);
+      });
+      this.resizeObserver.observe(viewer);
       const savedLocation = this.getSavedReaderLocation(file.path);
       await this.rendition.display(savedLocation || undefined).catch(async () => {
         this.clearSavedReaderLocation(file.path);
@@ -548,6 +548,8 @@ class EpubReaderView extends FileView {
 
   private resizeRendition(viewer: HTMLElement): void {
     if (!this.rendition || viewer.clientWidth <= 0 || viewer.clientHeight <= 0) return;
+    const rendition = this.rendition as Rendition & { manager?: { resize?: unknown } };
+    if (typeof rendition.manager?.resize !== "function") return;
     this.rendition.resize(viewer.clientWidth, viewer.clientHeight);
   }
 
