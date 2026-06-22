@@ -723,6 +723,10 @@ async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir
     return ` ${attr}=${quote}${rewritten}${quote}`;
   });
 
+  body = body.replace(/<svg\b[\s\S]*?<image\b[^>]*(?:href|xlink:href)=(["'])([^"']+)\1[^>]*>[\s\S]*?<\/svg>/gi, (_full, _quote: string, imageSrc: string) => {
+    return `<p><img src="${imageSrc}" /></p>`;
+  });
+
   return body;
 }
 
@@ -760,12 +764,11 @@ function rewriteReaderHref(rawUrl: string, sourcePath: string, opfDir: string): 
   if (/^(?:https?:|mailto:|data:)/i.test(rawUrl)) return rawUrl;
   if (rawUrl.startsWith("#")) return rawUrl;
 
-  const [pathPart, fragment = ""] = rawUrl.split("#");
+  const [pathPart] = rawUrl.split("#");
   const decodedPath = decodeUriPath(pathPart);
   const absoluteTarget = path.normalize(path.join(path.dirname(sourcePath), decodedPath));
   const relativeTarget = normalizeFilePath(path.relative(opfDir, absoluteTarget));
-  const sectionId = readerSectionId(relativeTarget);
-  return fragment ? `#${sanitizeAnchorFragment(fragment)}` : `#${sectionId}`;
+  return `#${readerSectionId(relativeTarget)}`;
 }
 
 function readerSectionId(href: string): string {
