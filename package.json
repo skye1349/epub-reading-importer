@@ -1,6 +1,6 @@
 {
   "name": "epub-reading-importer",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -13,11 +13,5 @@
     "esbuild": "^0.28.1",
     "obsidian": "^1.8.7",
     "typescript": "^5.9.0"
-  },
-  "dependencies": {
-    "epubjs": "^0.3.93"
-  },
-  "overrides": {
-    "@xmldom/xmldom": "^0.9.10"
   }
 }

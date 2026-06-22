@@ -16,8 +16,6 @@ import {
   normalizePath
 } from "obsidian";
 import { Buffer } from "buffer";
-import ePub from "epubjs";
-import type { Book, Contents, Location, Rendition } from "epubjs";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import {
@@ -90,6 +88,11 @@ interface ExportSource {
   displayPath: string;
   bookName: string;
   isFolder: boolean;
+}
+
+interface EpubReaderChapter {
+  href: string;
+  sourcePath: string;
 }
 
 const EPUB_VIEW_TYPE = "epub-transfer-to-markdown-reader";
@@ -384,10 +387,12 @@ class EpubReadingImporterSettingTab extends PluginSettingTab {
 }
 
 class EpubReaderView extends FileView {
-  private book: Book | null = null;
+  private chapters: EpubReaderChapter[] = [];
+  private epub: EpubStructure | null = null;
+  private extractDir = "";
+  private frameEl: HTMLIFrameElement | null = null;
   private keydownHandler: ((event: KeyboardEvent) => void) | null = null;
-  private rendition: Rendition | null = null;
-  private resizeObserver: ResizeObserver | null = null;
+  private tempDir = "";
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -413,8 +418,17 @@ class EpubReaderView extends FileView {
     this.contentEl.createEl("div", { text: "Loading EPUB...", cls: "epub-reading-importer-status" });
 
     try {
-      const contents = await this.app.vault.readBinary(file);
-      await this.renderReader(file, contents);
+      this.tempDir = path.join(os.tmpdir(), "epub-reading-importer-reader", `${Date.now()}-${randomId()}`);
+      this.extractDir = path.join(this.tempDir, "epub");
+      await mkdir(this.extractDir, { recursive: true });
+
+      const inputPath = path.join(this.tempDir, "source.epub");
+      await writeFile(inputPath, Buffer.from(await this.app.vault.readBinary(file)));
+      await extractEpub(inputPath, this.extractDir, this.tempDir);
+
+      this.epub = await readEpubStructure(this.extractDir);
+      this.chapters = buildReaderChapters(this.epub);
+      await this.renderReader(file);
     } catch (error) {
       this.contentEl.empty();
       this.contentEl.createEl("div", {
@@ -432,7 +446,7 @@ class EpubReaderView extends FileView {
     await super.setState(state, result);
   }
 
-  private async renderReader(file: TFile, contents: ArrayBuffer): Promise<void> {
+  private async renderReader(file: TFile): Promise<void> {
     this.contentEl.empty();
     const shell = this.contentEl.createDiv({ cls: "epub-reading-importer-reader-shell" });
 
@@ -452,89 +466,49 @@ class EpubReaderView extends FileView {
       cls: "epub-reading-importer-page-button epub-reading-importer-page-button-right"
     });
     const statusEl = reader.createDiv({ text: "Loading EPUB...", cls: "epub-reading-importer-reader-loading" });
-
-    this.book = ePub(contents, { replacements: "blobUrl" });
-    this.rendition = this.book.renderTo(viewer, {
-      width: "100%",
-      height: "100%",
-      flow: "paginated",
-      manager: "default",
-      spread: "auto",
-      allowScriptedContent: false
+    this.frameEl = viewer.createEl("iframe", {
+      title: file.basename,
+      attr: {
+        sandbox: "allow-same-origin"
+      }
     });
 
-    this.applyReaderTheme();
-    const colors = this.getReaderColors();
-    this.rendition.hooks.content.register((bookContents: Contents) => {
-      bookContents.document.documentElement.style.background = colors.background;
-      bookContents.document.body.style.background = colors.background;
-      bookContents.document.body.style.color = colors.text;
-    });
-
-    this.rendition.on("relocated", (location: Location) => {
-      this.saveReaderLocation(file.path, location.start.cfi);
-    });
+    if (!this.epub || this.chapters.length === 0) {
+      statusEl.setText("No readable chapters were found in this EPUB.");
+      statusEl.addClass("epub-reading-importer-reader-error");
+      return;
+    }
 
     previousButton.onClickEvent(() => {
-      void this.rendition?.prev();
+      this.turnReaderPage(-1);
     });
     nextButton.onClickEvent(() => {
-      void this.rendition?.next();
+      this.turnReaderPage(1);
     });
 
     this.keydownHandler = (event) => {
       if (event.key === "ArrowLeft") {
         event.preventDefault();
-        void this.rendition?.prev();
+        this.turnReaderPage(-1);
       }
       if (event.key === "ArrowRight") {
         event.preventDefault();
-        void this.rendition?.next();
+        this.turnReaderPage(1);
       }
     };
     this.contentEl.tabIndex = 0;
     this.contentEl.addEventListener("keydown", this.keydownHandler);
 
     try {
-      await this.book.ready;
-      await this.rendition.started;
+      const html = await prepareReaderBookHtml(this.epub, this.chapters, this.getReaderColors());
+      this.frameEl.srcdoc = html;
       await waitForAnimationFrame();
-      this.resizeRendition(viewer);
-      this.resizeObserver = new ResizeObserver(() => {
-        this.resizeRendition(viewer);
-      });
-      this.resizeObserver.observe(viewer);
-      const savedLocation = this.getSavedReaderLocation(file.path);
-      await this.rendition.display(savedLocation || undefined).catch(async () => {
-        this.clearSavedReaderLocation(file.path);
-        await this.rendition?.display();
-      });
       statusEl.remove();
       this.contentEl.focus();
     } catch (error) {
       statusEl.setText(error instanceof Error ? error.message : "Could not render this EPUB.");
       statusEl.addClass("epub-reading-importer-reader-error");
     }
-  }
-
-  private applyReaderTheme(): void {
-    if (!this.rendition) return;
-    const colors = this.getReaderColors();
-    this.rendition.themes.default({
-      body: {
-        background: colors.background,
-        color: colors.text,
-        "font-family": "Georgia, 'Times New Roman', serif",
-        "line-height": "1.65"
-      },
-      "a, a:link, a:visited": {
-        color: colors.link
-      },
-      "img, svg": {
-        "max-width": "100% !important",
-        height: "auto !important"
-      }
-    });
   }
 
   private getReaderColors(): { background: string; link: string; text: string } {
@@ -546,27 +520,13 @@ class EpubReaderView extends FileView {
     };
   }
 
-  private resizeRendition(viewer: HTMLElement): void {
-    if (!this.rendition || viewer.clientWidth <= 0 || viewer.clientHeight <= 0) return;
-    const rendition = this.rendition as Rendition & { manager?: { resize?: unknown } };
-    if (typeof rendition.manager?.resize !== "function") return;
-    this.rendition.resize(viewer.clientWidth, viewer.clientHeight);
-  }
-
-  private getSavedReaderLocation(filePath: string): string {
-    return activeWindow.localStorage.getItem(this.readerLocationKey(filePath)) || "";
-  }
-
-  private saveReaderLocation(filePath: string, cfi: string): void {
-    activeWindow.localStorage.setItem(this.readerLocationKey(filePath), cfi);
-  }
-
-  private clearSavedReaderLocation(filePath: string): void {
-    activeWindow.localStorage.removeItem(this.readerLocationKey(filePath));
-  }
-
-  private readerLocationKey(filePath: string): string {
-    return `epub-transfer-to-markdown-location-${filePath}`;
+  private turnReaderPage(direction: -1 | 1): void {
+    const frameWindow = this.frameEl?.contentWindow;
+    if (!frameWindow || !this.frameEl) return;
+    frameWindow.scrollBy({
+      left: direction * Math.max(320, Math.floor(this.frameEl.clientWidth * 0.88)),
+      behavior: "smooth"
+    });
   }
 
   private async cleanupReader(): Promise<void> {
@@ -574,12 +534,14 @@ class EpubReaderView extends FileView {
       this.contentEl.removeEventListener("keydown", this.keydownHandler);
       this.keydownHandler = null;
     }
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
-    this.rendition?.destroy();
-    this.rendition = null;
-    this.book?.destroy();
-    this.book = null;
+    this.frameEl = null;
+    this.epub = null;
+    this.chapters = [];
+    if (this.tempDir) {
+      await rm(this.tempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    this.tempDir = "";
+    this.extractDir = "";
   }
 }
 
@@ -707,7 +669,7 @@ function getVaultBasePath(app: App): string {
 
 function waitForAnimationFrame(): Promise<void> {
   return new Promise((resolve) => {
-    activeWindow.requestAnimationFrame(() => resolve());
+    window.requestAnimationFrame(() => resolve());
   });
 }
 
@@ -803,6 +765,157 @@ async function convertEpubForObsidian(options: {
 
   await writeFile(path.join(options.outputDir, "00 - Index.md"), buildIndex(options.bookName, chapters, options.keepSourceEpub));
   await writeFile(path.join(options.outputDir, "AI Reading Guide.md"), buildReadingGuide(options.bookName, chapters));
+}
+
+function buildReaderChapters(epub: EpubStructure): EpubReaderChapter[] {
+  const chapters: EpubReaderChapter[] = [];
+
+  for (const spineItem of epub.spine) {
+    const item = epub.manifest.get(spineItem.idref);
+    if (!item || !isHtmlItem(item)) continue;
+
+    const sourcePath = path.join(epub.opfDir, decodeUriPath(item.href));
+    chapters.push({
+      href: normalizeFilePath(path.relative(epub.opfDir, sourcePath)),
+      sourcePath
+    });
+  }
+
+  return chapters;
+}
+
+async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderChapter[], colors: { background: string; link: string; text: string }): Promise<string> {
+  const sections = await Promise.all(
+    chapters.map(async (chapter) => {
+      const html = await readFile(chapter.sourcePath, "utf8");
+      const body = await prepareReaderSectionHtml(html, chapter.sourcePath, epub.opfDir);
+      return `<section class="epub-section" id="${escapeAttribute(readerSectionId(chapter.href))}">${body}</section>`;
+    })
+  );
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  body {
+    background: ${colors.background};
+    box-sizing: border-box;
+    color: ${colors.text};
+    column-gap: 80px;
+    column-width: calc(100vw - 112px);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 18px;
+    line-height: 1.65;
+    padding: 38px 56px;
+  }
+  img,
+  svg {
+    break-inside: avoid;
+    height: auto;
+    max-width: 100%;
+  }
+  a {
+    color: ${colors.link};
+  }
+  .epub-section {
+    break-after: column;
+  }
+  * {
+    max-width: 100%;
+  }
+</style>
+</head>
+<body>${sections.join("\n")}</body>
+</html>`;
+}
+
+async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir: string): Promise<string> {
+  const body = extractHtmlBody(html).replace(/<script\b[\s\S]*?<\/script>/gi, "");
+  const rewritten = await replaceAsync(body, /<([A-Za-z][\w:-]*)\b([^>]*)>/g, async (full: string, tagName: string, attrs: string) => {
+    const updatedAttrs = await rewriteReaderAttributes(tagName.toLowerCase(), attrs, sourcePath, opfDir);
+    return `<${tagName}${updatedAttrs}>`;
+  });
+
+  return rewritten.replace(/\son[a-z]+\s*=\s*(["']).*?\1/gi, "");
+}
+
+async function rewriteReaderAttributes(tagName: string, attrs: string, sourcePath: string, opfDir: string): Promise<string> {
+  return replaceAsync(attrs, /\s(src|href|xlink:href)=("([^"]*)"|'([^']*)')/gi, async (full: string, attr: string, quotedValue: string, doubleValue = "", singleValue = "") => {
+    const rawUrl = doubleValue || singleValue;
+    const quote = quotedValue.startsWith("'") ? "'" : "\"";
+    const value = await rewriteReaderAttributeValue(tagName, attr, rawUrl, sourcePath, opfDir);
+    return ` ${attr}=${quote}${escapeAttribute(value)}${quote}`;
+  });
+}
+
+async function rewriteReaderAttributeValue(tagName: string, attr: string, rawUrl: string, sourcePath: string, opfDir: string): Promise<string> {
+  if (/^(?:https?:|mailto:|data:)/i.test(rawUrl)) return rawUrl;
+  if (attr.toLowerCase() === "href" && tagName === "a") {
+    return rewriteReaderLink(rawUrl, sourcePath, opfDir);
+  }
+  return readerResourceToDataUrl(rawUrl, sourcePath);
+}
+
+function rewriteReaderLink(rawUrl: string, sourcePath: string, opfDir: string): string {
+  if (rawUrl.startsWith("#")) return rawUrl;
+
+  const [pathPart, fragment = ""] = rawUrl.split("#");
+  const targetPath = path.normalize(path.join(path.dirname(sourcePath), decodeUriPath(pathPart)));
+  const targetHref = normalizeFilePath(path.relative(opfDir, targetPath));
+  if (fragment) return `#${decodeUriPath(fragment)}`;
+  return `#${readerSectionId(targetHref)}`;
+}
+
+async function readerResourceToDataUrl(rawUrl: string, sourcePath: string): Promise<string> {
+  if (rawUrl.startsWith("#")) return rawUrl;
+
+  const cleanUrl = stripFragment(decodeUriPath(rawUrl));
+  const resourcePath = path.normalize(path.join(path.dirname(sourcePath), cleanUrl));
+  const data = await readFile(resourcePath).catch(() => null);
+  if (!data) return rawUrl;
+  return `data:${mediaTypeForPath(resourcePath)};base64,${data.toString("base64")}`;
+}
+
+function readerSectionId(href: string): string {
+  return `epub-${normalizeFilePath(stripFragment(href)).replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+}
+
+function extractHtmlBody(html: string): string {
+  return html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] || html;
+}
+
+function escapeAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function mediaTypeForPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".svg") return "image/svg+xml";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".css") return "text/css";
+  return "application/octet-stream";
+}
+
+async function replaceAsync(source: string, pattern: RegExp, replacer: (...args: string[]) => Promise<string>): Promise<string> {
+  const matches = [...source.matchAll(pattern)];
+  const replacements = await Promise.all(matches.map((match) => replacer(...(match as unknown as string[]))));
+  let index = 0;
+  return source.replace(pattern, () => replacements[index++] ?? "");
 }
 
 async function exportMarkdownToEpub(options: {
