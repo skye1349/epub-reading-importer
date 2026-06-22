@@ -4,7 +4,7 @@ Transfer EPUB books into chapter-based Markdown notes.
 
 This plugin is designed for people who keep books and reading notes in a local vault. It converts an EPUB into a folder of Markdown files, keeps image assets together, and creates an index note plus an AI reading guide.
 
-It can also export an edited book folder back to EPUB and prepare a Send-to-Kindle email draft with the exported EPUB attached.
+It can also export an edited book folder back to EPUB and send an existing EPUB to Kindle through your local mail client.
 
 It also registers an EPUB reader, so `.epub` files in the vault can be opened directly.
 
@@ -114,15 +114,15 @@ After export, the plugin shows the output path and copies the full system path t
 ### Send to Kindle
 
 1. Set your Kindle email in the plugin settings.
-2. Run `Export Markdown to EPUB for Kindle`.
-3. Enter the source Markdown file or folder.
-4. Optionally enter the output EPUB path.
-5. The plugin creates an EPUB and opens an email draft with the EPUB attached.
-6. Review the draft and send it from your mail client.
+2. Open an `.epub` file in the vault, or right-click an `.epub` file in the file explorer.
+3. Run `Send EPUB to Kindle` from the command palette or the file menu.
+4. Review the email draft and send it from your mail client.
+
+If you edited Markdown chapters and want to send that edited book, run `Export Markdown to EPUB` first. Then open or right-click the exported EPUB and run `Send EPUB to Kindle`.
 
 Kindle delivery uses your Kindle email address, such as `name_123@kindle.com`. Your sending email address must also be approved in your Amazon Kindle document settings.
 
-On macOS, Kindle delivery uses Apple Mail. On Windows, it uses Outlook if Outlook is installed and configured.
+On macOS, Kindle delivery uses Apple Mail. On Windows, it uses Outlook if Outlook is installed and configured. The plugin prepares a draft instead of silently sending email, so the message is sent from your own approved personal email account.
 
 ## Settings
 

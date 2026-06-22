@@ -1,12 +1,14 @@
 import {
   App,
   FileView,
+  Menu,
   Modal,
   Notice,
   Platform,
   Plugin,
   PluginSettingTab,
   Setting,
+  TAbstractFile,
   TFile,
   TFolder,
   ViewStateResult,
@@ -166,17 +168,23 @@ export default class EpubReadingImporterPlugin extends Plugin {
       id: "export-current-book-to-epub",
       name: "Export Markdown to EPUB",
       callback: () => {
-        void this.exportFolder(false);
+        void this.exportFolder();
       }
     });
 
     this.addCommand({
-      id: "export-current-book-to-kindle",
-      name: "Export Markdown to EPUB for Kindle",
+      id: "send-epub-to-kindle",
+      name: "Send EPUB to Kindle",
       callback: () => {
-        void this.exportFolder(true);
+        void this.sendActiveEpubToKindle();
       }
     });
+
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        this.addSendToKindleMenuItem(menu, file);
+      })
+    );
 
     this.addSettingTab(new EpubReadingImporterSettingTab(this.app, this));
   }
@@ -233,7 +241,7 @@ export default class EpubReadingImporterPlugin extends Plugin {
     }
   }
 
-  private async exportFolder(forKindle: boolean) {
+  private async exportFolder() {
     if (!Platform.isDesktopApp) {
       new Notice("EPUB export needs Obsidian desktop.");
       return;
@@ -242,7 +250,7 @@ export default class EpubReadingImporterPlugin extends Plugin {
     try {
       const vaultBasePath = getVaultBasePath(this.app);
       const defaults = getExportDefaults(this.app.workspace.getActiveFile(), this.settings);
-      const exportRequest = await promptForExportPaths(this.app, defaults.sourcePath, defaults.outputPath, forKindle);
+      const exportRequest = await promptForExportPaths(this.app, defaults.sourcePath, defaults.outputPath);
       if (!exportRequest) return;
 
       const source = await resolveExportSource(exportRequest.sourcePath, vaultBasePath);
@@ -259,17 +267,49 @@ export default class EpubReadingImporterPlugin extends Plugin {
         pandocPath: this.settings.pandocPath
       });
 
-      if (forKindle) {
-        await prepareKindleDelivery(outputPath, this.settings.kindleEmail);
-        await copyTextToClipboard(outputPath);
-        new Notice(`Exported EPUB to ${outputDisplayPath}. Full path copied.`);
-        return;
-      }
-
       await copyTextToClipboard(outputPath);
       new Notice(`Exported EPUB to ${outputDisplayPath}. Full path copied.`);
     } catch (error) {
       new Notice(error instanceof Error ? error.message : "EPUB export failed.");
+    }
+  }
+
+  private addSendToKindleMenuItem(menu: Menu, file: TAbstractFile) {
+    if (!(file instanceof TFile) || file.extension.toLowerCase() !== "epub") return;
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Send EPUB to Kindle")
+        .setIcon("send")
+        .onClick(() => {
+          void this.sendEpubFileToKindle(file);
+        });
+    });
+  }
+
+  private async sendActiveEpubToKindle() {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile || activeFile.extension.toLowerCase() !== "epub") {
+      new Notice("Open or right-click an EPUB file first.");
+      return;
+    }
+
+    await this.sendEpubFileToKindle(activeFile);
+  }
+
+  private async sendEpubFileToKindle(file: TFile) {
+    if (!Platform.isDesktopApp) {
+      new Notice("Send to Kindle needs Obsidian desktop.");
+      return;
+    }
+
+    try {
+      const vaultBasePath = getVaultBasePath(this.app);
+      const epubPath = path.join(vaultBasePath, file.path);
+      await prepareKindleDelivery(epubPath, this.settings.kindleEmail);
+      new Notice(`Prepared Kindle email draft for ${file.name}.`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "Send to Kindle failed.");
     }
   }
 }
@@ -436,21 +476,19 @@ class EpubReaderView extends FileView {
 class ExportPathsModal extends Modal {
   private sourcePath: string;
   private outputPath: string;
-  private readonly forKindle: boolean;
   private readonly onSubmit: (request: ExportPathRequest | null) => void;
   private submitted = false;
 
-  constructor(app: App, defaultSource: string, defaultOutput: string, forKindle: boolean, onSubmit: (request: ExportPathRequest | null) => void) {
+  constructor(app: App, defaultSource: string, defaultOutput: string, onSubmit: (request: ExportPathRequest | null) => void) {
     super(app);
     this.sourcePath = defaultSource;
     this.outputPath = defaultOutput;
-    this.forKindle = forKindle;
     this.onSubmit = onSubmit;
   }
 
   onOpen() {
     const { contentEl } = this;
-    this.titleEl.setText(this.forKindle ? "Export Markdown to EPUB for Kindle" : "Export Markdown to EPUB");
+    this.titleEl.setText("Export Markdown to EPUB");
     contentEl.empty();
 
     contentEl.createEl("p", {
@@ -508,7 +546,7 @@ class ExportPathsModal extends Modal {
       .addButton((button) =>
         button
           .setCta()
-          .setButtonText(this.forKindle ? "Export for Kindle" : "Export EPUB")
+          .setButtonText("Export EPUB")
           .onClick(() => {
             this.submit();
           })
@@ -532,9 +570,9 @@ class ExportPathsModal extends Modal {
   }
 }
 
-function promptForExportPaths(app: App, defaultSource: string, defaultOutput: string, forKindle: boolean): Promise<ExportPathRequest | null> {
+function promptForExportPaths(app: App, defaultSource: string, defaultOutput: string): Promise<ExportPathRequest | null> {
   return new Promise((resolve) => {
-    new ExportPathsModal(app, defaultSource, defaultOutput, forKindle, resolve).open();
+    new ExportPathsModal(app, defaultSource, defaultOutput, resolve).open();
   });
 }
 
