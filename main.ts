@@ -674,7 +674,7 @@ async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderCh
     chapters.map(async (chapter) => {
       const html = await readFile(chapter.sourcePath, "utf8");
       const body = await prepareReaderSectionHtml(html, chapter.sourcePath, epub.opfDir);
-      return `<section class="epub-section" id="${escapeHtml(chapter.href)}">${body}</section>`;
+      return `<section class="epub-section" id="${escapeHtml(readerSectionId(chapter.href))}">${body}</section>`;
     })
   );
 
@@ -714,13 +714,13 @@ async function prepareReaderBookHtml(epub: EpubStructure, chapters: EpubReaderCh
 async function prepareReaderSectionHtml(html: string, sourcePath: string, opfDir: string): Promise<string> {
   let body = extractHtmlBody(html)
     .replace(/<script\b[\s\S]*?<\/script>/gi, "")
-    .replace(/\s(?:src|href|xlink:href)=(["'])([^"']+)\1/gi, (_full, quote: string, rawUrl: string) => {
-      return ` data-epub-resource=${quote}${rawUrl}${quote}`;
+    .replace(/\s(src|href|xlink:href)=(["'])([^"']+)\2/gi, (_full, attr: string, quote: string, rawUrl: string) => {
+      return ` data-epub-attr=${quote}${attr}${quote} data-epub-resource=${quote}${rawUrl}${quote}`;
     });
 
-  body = await replaceAsync(body, /\sdata-epub-resource=(["'])([^"']+)\1/gi, async (_full, quote: string, rawUrl: string) => {
-    const rewritten = await rewriteReaderResourceUrl(rawUrl, sourcePath, opfDir);
-    return ` src=${quote}${rewritten}${quote}`;
+  body = await replaceAsync(body, /\sdata-epub-attr=(["'])([^"']+)\1\sdata-epub-resource=(["'])([^"']+)\3/gi, async (_full, quote: string, attr: string, _resourceQuote: string, rawUrl: string) => {
+    const rewritten = await rewriteReaderResourceAttribute(attr, rawUrl, sourcePath, opfDir);
+    return ` ${attr}=${quote}${rewritten}${quote}`;
   });
 
   return body;
@@ -746,6 +746,34 @@ async function rewriteReaderResourceUrl(rawUrl: string, sourcePath: string, opfD
   const relativePath = normalizeFilePath(path.relative(opfDir, resourcePath));
   const dataUrl = await fileToDataUrl(resourcePath).catch(() => null);
   return dataUrl || relativePath || rawUrl;
+}
+
+async function rewriteReaderResourceAttribute(attr: string, rawUrl: string, sourcePath: string, opfDir: string): Promise<string> {
+  if (/href$/i.test(attr)) {
+    return rewriteReaderHref(rawUrl, sourcePath, opfDir);
+  }
+
+  return rewriteReaderResourceUrl(rawUrl, sourcePath, opfDir);
+}
+
+function rewriteReaderHref(rawUrl: string, sourcePath: string, opfDir: string): string {
+  if (/^(?:https?:|mailto:|data:)/i.test(rawUrl)) return rawUrl;
+  if (rawUrl.startsWith("#")) return rawUrl;
+
+  const [pathPart, fragment = ""] = rawUrl.split("#");
+  const decodedPath = decodeUriPath(pathPart);
+  const absoluteTarget = path.normalize(path.join(path.dirname(sourcePath), decodedPath));
+  const relativeTarget = normalizeFilePath(path.relative(opfDir, absoluteTarget));
+  const sectionId = readerSectionId(relativeTarget);
+  return fragment ? `#${sanitizeAnchorFragment(fragment)}` : `#${sectionId}`;
+}
+
+function readerSectionId(href: string): string {
+  return `epub-${normalizeFilePath(stripFragment(href)).replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+}
+
+function sanitizeAnchorFragment(fragment: string): string {
+  return decodeUriPath(fragment).replace(/[^A-Za-z0-9_-]+/g, "-");
 }
 
 async function fileToDataUrl(filePath: string): Promise<string> {
